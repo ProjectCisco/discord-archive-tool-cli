@@ -1,0 +1,22 @@
+{
+  "name": "discord-archive-tool-cli",
+  "version": "0.1.0",
+  "description": "Archive a Discord category, verify the archive is complete, then delete the source channels.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.22.3 <25"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "discord-api-types": "0.38.60"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}
