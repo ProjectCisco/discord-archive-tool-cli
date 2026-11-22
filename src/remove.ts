@@ -1,27 +1,22 @@
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { RUN_RECORD, readRunRecord } from './destinations/onedrive.ts';
+import { RUN_RECORD, readRunRecord, walk } from './archive-folder.ts';
+import type { Store } from './destinations/store.ts';
 import type { Discord } from './discord.ts';
-import type { Graph } from './graph.ts';
-import { MANIFEST_NAME, parseManifest } from './manifest.ts';
+import { sha256File } from './manifest.ts';
 import type { RunState } from './state.ts';
-import { checkCapture, readTranscripts, walk } from './verify.ts';
+import { checkCapture, readTranscripts } from './verify.ts';
 
 // The delete command's safety net (design section 7). Deleting can't be undone, so everything
 // verify proved is proved again, minutes before, and any doubt means nothing is deleted.
 
-export interface Recheck {
-  problems: string[];
-}
-
 export interface RecheckOptions {
   discord: Discord;
-  graph: Graph;
+  store: Store;
   state: RunState;
   treeDir: string;
 }
 
-// Why delete would refuse this run before looking at Discord or OneDrive at all.
+// Why delete would refuse this run before looking at Discord or the destination at all.
 export function refusal(state: RunState | null): string | null {
   if (!state) return 'No archive of this category exists on this computer. Run archive first.';
   if (state.verification?.status !== 'verified' || !state.upload) {
@@ -31,44 +26,41 @@ export function refusal(state: RunState | null): string | null {
   return null;
 }
 
-export async function recheck(options: RecheckOptions): Promise<Recheck> {
-  const { state } = options;
+export async function recheck(options: RecheckOptions): Promise<string[]> {
+  const { state, store } = options;
   const upload = state.upload;
   const remote = state.verification?.remote;
-  if (!upload || !remote) return { problems: ['There is no verified upload to check against'] };
+  if (!upload || !remote) return ['There is no verified upload to check against'];
 
   const transcripts = await readTranscripts(options.treeDir, state);
-  const capture = await checkCapture(options.discord, state, transcripts);
-  const problems = [...capture.problems];
+  const problems = [...(await checkCapture(options.discord, state, transcripts)).problems];
 
-  // OneDrive: the run record still says verified, every file is unchanged, and nothing was added.
-  // quickXorHash is OneDrive's own checksum, so nothing needs downloading again.
-  const record = await readRunRecord(options.graph, upload.folderId).catch(() => null);
-  if (record?.status !== 'verified') problems.push(`${RUN_RECORD} in OneDrive no longer says verified`);
+  // The destination: the run record still says verified, every file is unchanged (by the
+  // service's own checksum, so nothing needs downloading), and nothing was added.
+  const where = store.label;
+  const record = await readRunRecord(store, upload.folderId).catch(() => null);
+  if (record?.status !== 'verified') problems.push(`${RUN_RECORD} in ${where} no longer says verified`);
 
-  const { files } = await walk(options.graph, upload.folderId);
-  const manifest = parseManifest(await readFile(join(options.treeDir, MANIFEST_NAME), 'utf8'));
+  const { files } = await walk(store, upload.folderId);
   for (const [path, expected] of Object.entries(remote)) {
     const item = files.get(path);
-    if (!item) {
-      problems.push(`${path} is no longer in OneDrive`);
-      continue;
-    }
-    const quickXorHash = item.file?.hashes?.quickXorHash ?? null;
-    if (item.size !== expected.size) problems.push(`${path} changed size in OneDrive since it was verified`);
-    else if (expected.quickXorHash && quickXorHash !== expected.quickXorHash) {
-      problems.push(`${path} changed in OneDrive since it was verified`);
-    } else if (!expected.quickXorHash || !quickXorHash) {
-      // No OneDrive checksum to compare: read the file back instead.
-      const back = await options.graph.downloadSha256(item.id);
-      const sha256 = path === MANIFEST_NAME ? null : manifest.get(path);
-      if (sha256 && back.sha256 !== sha256) problems.push(`${path} changed in OneDrive since it was verified`);
+    if (!item) problems.push(`${path} is no longer in ${where}`);
+    else if (item.size !== expected.size) problems.push(`${path} changed size in ${where} since it was verified`);
+    else if (!expected.checksum || item.checksum !== expected.checksum) {
+      // No checksum from the service to compare: read the file back instead.
+      const sameBytes = !expected.checksum && !item.checksum && (await sameAsLocal(store, item.id, join(options.treeDir, path)));
+      if (!sameBytes) problems.push(`${path} changed in ${where} since it was verified`);
     }
   }
   for (const path of files.keys()) {
-    if (path !== RUN_RECORD && !remote[path]) problems.push(`${path} was added to OneDrive after verification`);
+    if (path !== RUN_RECORD && !remote[path]) problems.push(`${path} was added to ${where} after verification`);
   }
-  return { problems };
+  return problems;
+}
+
+async function sameAsLocal(store: Store, id: string, localPath: string): Promise<boolean> {
+  const [back, local] = await Promise.all([store.download(id), sha256File(localPath)]);
+  return back.sha256 === local;
 }
 
 export interface Planned {

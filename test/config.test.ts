@@ -26,8 +26,18 @@ describe('loadConfig', () => {
     assert.equal(config.oneDrive?.root, 'Team/Archives');
   });
 
-  test('requires the OneDrive settings only for OneDrive', () => {
+  test('requires each destination’s settings only for that destination', () => {
     assert.throws(() => loadConfig(core, 'onedrive'), /GRAPH_TENANT_ID is missing/);
+    assert.throws(() => loadConfig({ ...core, ...oneDrive }, 'google-drive'), /GOOGLE_CLIENT_ID is missing/);
+    const google = loadConfig(
+      { ...core, GOOGLE_CLIENT_ID: '123-abc.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 's', GOOGLE_DRIVE_ROOT: 'Discord Archives' },
+      'google-drive',
+    );
+    assert.deepEqual([google.oneDrive, google.googleDrive?.root], [null, 'Discord Archives']);
+    assert.throws(
+      () => loadConfig({ ...core, GOOGLE_CLIENT_ID: 'not-a-client', GOOGLE_CLIENT_SECRET: 's', GOOGLE_DRIVE_ROOT: 'x' }, 'google-drive'),
+      /GOOGLE_CLIENT_ID is not in the expected format/,
+    );
   });
 
   test('names every missing or malformed value at once', () => {

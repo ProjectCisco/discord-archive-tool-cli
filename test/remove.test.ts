@@ -5,12 +5,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { ChannelType } from 'discord-api-types/v10';
 import { captureCategory } from '../src/capture.ts';
-import { RUN_RECORD, uploadToOneDrive, writeRunRecord } from '../src/destinations/onedrive.ts';
+import { RUN_RECORD, uploadArchive, writeRunRecord } from '../src/archive-folder.ts';
 import { deleteChannels, plan, recheck, refusal } from '../src/remove.ts';
 import { readState, type RunState } from '../src/state.ts';
 import { verifyArchive } from '../src/verify.ts';
 import { CATEGORY, FORUM, TEXT, VOICE, channel, fake, message, server } from './fakes/discord.ts';
-import { fakeDrive } from './fakes/drive.ts';
+import { fakeStore } from './fakes/store.ts';
 
 const BASE = 'Team/Archives/Archive 2026';
 
@@ -28,19 +28,19 @@ async function verified() {
   await captureCategory({ discord: fake(world), categoryId: CATEGORY, runDir, operator: 'tester', log: () => {} });
   const state = await readState(runDir);
   assert.ok(state);
-  const drive = fakeDrive();
+  const drive = fakeStore();
   drive.folder('Team/Archives');
   const treeDir = join(runDir, 'tree');
-  const graph = drive.graph;
-  await uploadToOneDrive({ graph, root: 'Team/Archives', treeDir, state, save: async () => {}, log: () => {} });
+  const store = drive.store;
+  await uploadArchive({ store, destination: 'onedrive', treeDir, state, save: async () => {}, log: () => {} });
   const folderId = state.upload?.folderId;
   assert.ok(folderId);
-  const result = await verifyArchive({ discord: fake(world), graph, state, treeDir, folderId, log: () => {} });
+  const result = await verifyArchive({ discord: fake(world), store, state, treeDir, folderId, log: () => {} });
   assert.ok(result.passed);
-  await writeRunRecord(graph, folderId, state, 'verified');
+  await writeRunRecord(store, folderId, state, 'verified');
   state.verification = { status: 'verified', at: '2026-11-22T10:00:00.000Z', checks: result.checks, remote: result.remote };
 
-  const check = () => recheck({ discord: fake(world), graph, state, treeDir });
+  const check = () => recheck({ discord: fake(world), store, state, treeDir });
   const remove = (saves: string[] = [], audits: string[] = []) =>
     deleteChannels({
       discord: fake(world),
@@ -85,7 +85,7 @@ describe('refusal', () => {
 describe('recheck', () => {
   test('passes when nothing changed in Discord or OneDrive', async () => {
     const { check } = await verified();
-    assert.deepEqual((await check()).problems, []);
+    assert.deepEqual((await check()), []);
   });
 
   test('refuses after a late message, thread or channel', async () => {
@@ -93,7 +93,7 @@ describe('recheck', () => {
     world.messages[TEXT]?.push(message('300000000000000999', TEXT, { content: 'late message' }));
     world.activeThreads.push(channel('100000000000000098', ChannelType.PublicThread, 'late thread', TEXT));
     world.channels.push(channel('100000000000000099', ChannelType.GuildText, 'late-channel', CATEGORY));
-    assert.deepEqual((await check()).problems, [
+    assert.deepEqual((await check()), [
       '#late-channel was added to the category after capture',
       '#case-one has new messages since capture',
       '#case-one: thread "late thread" was created after capture',
@@ -105,17 +105,17 @@ describe('recheck', () => {
     drive.tamper(`${BASE}/case-one/attachments/image.png`, 'XXXXXXXX');
     drive.remove(`${BASE}/_index.html`);
     drive.add(drive.folder(`${BASE}/hearing`).id, 'notes.txt', false, new TextEncoder().encode('stray'));
-    assert.deepEqual((await check()).problems.sort(), [
-      '_index.html is no longer in OneDrive',
-      'case-one/attachments/image.png changed in OneDrive since it was verified',
-      'hearing/notes.txt was added to OneDrive after verification',
+    assert.deepEqual((await check()).sort(), [
+      '_index.html is no longer in Test Drive',
+      'case-one/attachments/image.png changed in Test Drive since it was verified',
+      'hearing/notes.txt was added to Test Drive after verification',
     ]);
   });
 
   test('refuses when the run record no longer says verified', async () => {
     const { drive, state, folderId, check } = await verified();
-    await writeRunRecord(drive.graph, folderId, state, 'uploaded');
-    assert.deepEqual((await check()).problems, [`${RUN_RECORD} in OneDrive no longer says verified`]);
+    await writeRunRecord(drive.store, folderId, state, 'uploaded');
+    assert.deepEqual((await check()), [`${RUN_RECORD} in Test Drive no longer says verified`]);
   });
 });
 

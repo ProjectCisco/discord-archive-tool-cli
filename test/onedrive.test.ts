@@ -1,206 +1,149 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import { RUN_RECORD, preflightOneDrive, uploadToOneDrive, type RunRecord } from '../src/destinations/onedrive.ts';
-import { MANIFEST_NAME, writeManifest } from '../src/manifest.ts';
-import { STATE_SCHEMA, type RunState } from '../src/state.ts';
-import { fakeDrive, type FakeDrive } from './fakes/drive.ts';
+import { createOneDrive } from '../src/destinations/onedrive.ts';
+import { RemoteError } from '../src/http.ts';
 
-const GUILD = '100000000000000001';
-const CATEGORY = '100000000000000002';
+const API = 'https://graph.microsoft.com/v1.0/me/drive';
 
-function state(): RunState {
-  return {
-    schema: STATE_SCHEMA,
-    guildId: GUILD,
-    categoryId: CATEGORY,
-    categoryName: 'Archive: November 2026',
-    startedAt: '2026-11-22T10:00:00.000Z',
-    channels: {},
-  };
+interface Call {
+  method: string;
+  url: string;
+  authorization: string | null;
+  contentRange: string | null;
+  body: Uint8Array | null;
+  text: string | null;
 }
 
-let treeDir: string;
+function fakeGraph(reply: (call: Call) => Response) {
+  const calls: Call[] = [];
+  const waits: number[] = [];
+  const http = (async (url: string | URL | Request, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    const body = init?.body instanceof Uint8Array ? new Uint8Array(init.body) : null;
+    const call = {
+      method: init?.method ?? 'GET',
+      url: String(url),
+      authorization: headers.get('authorization'),
+      contentRange: headers.get('content-range'),
+      body,
+      text: typeof init?.body === 'string' ? init.body : null,
+    };
+    calls.push(call);
+    return reply(call);
+  }) as typeof fetch;
+  const graph = createOneDrive({
+    token: async () => 'access-token',
+    root: 'Team #1/Archives & Logs',
+    fetch: http,
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+    chunkSize: 4,
+  });
+  return { graph, calls, waits };
+}
+
+const item = (id: string, extra: object = {}) => Response.json({ id, name: id, webUrl: `https://onedrive.test/${id}`, ...extra });
+
+let dir: string;
 beforeEach(async () => {
-  treeDir = await mkdtemp(join(tmpdir(), 'tree-'));
-  await mkdir(join(treeDir, 'case-one', 'attachments'), { recursive: true });
-  await writeFile(join(treeDir, '_index.html'), 'index');
-  await writeFile(join(treeDir, 'case-one', 'case-one.html'), 'page');
-  await writeFile(join(treeDir, 'case-one', 'case-one.json'), '{}');
-  await writeFile(join(treeDir, 'case-one', 'attachments', 'image.png'), 'png');
-  await writeManifest(treeDir);
+  dir = await mkdtemp(join(tmpdir(), 'graph-'));
 });
 afterEach(async () => {
-  await rm(treeDir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true });
 });
 
-async function upload(drive: FakeDrive, run = state(), saves: number[] = []) {
-  return uploadToOneDrive({
-    graph: drive.graph,
-    root: 'Team/Archives',
-    treeDir,
-    state: run,
-    save: async () => {
-      saves.push(Object.keys(run.upload?.files ?? {}).length);
-    },
-    log: () => {},
+describe('createOneDrive', () => {
+  test('finds the archive root by path, encoding every segment and sending the token', async () => {
+    const { graph, calls } = fakeGraph(() => item('root', { folder: {} }));
+    await graph.root();
+    assert.equal(calls[0]?.url, `${API}/root:/Team%20%231/Archives%20%26%20Logs`);
+    assert.equal(calls[0]?.authorization, 'Bearer access-token');
   });
-}
 
-const record = (drive: FakeDrive) =>
-  JSON.parse(drive.text(`Team/Archives/Archive_ November 2026/${RUN_RECORD}`) ?? 'null') as RunRecord | null;
+  test('never creates a missing root, and names the account it looked in', async () => {
+    const { graph, calls } = fakeGraph((call) =>
+      call.url === API
+        ? Response.json({ owner: { user: { displayName: 'Archive Owner', email: 'owner@example.test' } } })
+        : Response.json({ error: { code: 'itemNotFound', message: 'gone' } }, { status: 404 }),
+    );
+    await assert.rejects(graph.root(), /"Team #1\/Archives & Logs" was not found in the OneDrive of Archive Owner <owner@example.test>/);
+    assert.ok(calls.every((call) => call.method === 'GET'));
+  });
 
-describe('uploadToOneDrive', () => {
-  test('creates the folder, writes the run record first and the index and manifest last', async () => {
-    const drive = fakeDrive();
-    drive.folder('Team/Archives');
-    const result = await upload(drive);
+  test('returns null for a missing item and names the Graph error otherwise', async () => {
+    const missing = fakeGraph(() => Response.json({ error: { code: 'itemNotFound', message: 'gone' } }, { status: 404 }));
+    assert.equal(await missing.graph.child('parent', 'nothing'), null);
 
-    const base = 'Team/Archives/Archive_ November 2026';
-    assert.equal(result.folderName, 'Archive_ November 2026');
-    assert.equal(result.uploaded, 5);
-    assert.deepEqual(drive.writes, [
-      `${base}/${RUN_RECORD}`,
-      `${base}/case-one/attachments/image.png`,
-      `${base}/case-one/case-one.html`,
-      `${base}/case-one/case-one.json`,
-      `${base}/_index.html`,
-      `${base}/${MANIFEST_NAME}`,
-      `${base}/${RUN_RECORD}`,
-    ]);
-    assert.equal(drive.text(`${base}/case-one/attachments/image.png`), 'png');
+    const denied = fakeGraph(() => Response.json({ error: { code: 'accessDenied', message: 'Access denied' } }, { status: 403 }));
+    await assert.rejects(denied.graph.child('parent', 'x'), (error: unknown) => {
+      assert.ok(error instanceof RemoteError);
+      assert.equal(error.status, 403);
+      assert.equal(error.message, 'Microsoft Graph: Access denied (accessDenied)');
+      return true;
+    });
+  });
+
+  test('waits as long as Graph asks when throttled, then carries on', async () => {
+    let tries = 0;
+    const { graph, waits } = fakeGraph(() =>
+      ++tries < 3 ? new Response(null, { status: 429, headers: { 'retry-after': '7' } }) : item('done'),
+    );
+    assert.equal((await graph.child('parent', 'x'))?.id, 'done');
+    assert.deepEqual(waits, [7000, 7000]);
+  });
+
+  test('gives up after five tries', async () => {
+    const { graph, calls } = fakeGraph(() => new Response(null, { status: 503 }));
+    await assert.rejects(graph.child('parent', 'x'), /HTTP 503/);
+    assert.equal(calls.length, 5);
+  });
+
+  test('creates folders that fail on a name clash instead of merging', async () => {
+    const { graph, calls } = fakeGraph(() => item('new', { folder: {} }));
+    await graph.createFolder('parent', 'Archive');
+    assert.equal(calls[0]?.url, `${API}/items/parent/children`);
+    assert.deepEqual(JSON.parse(calls[0]?.text ?? ''), {
+      name: 'Archive',
+      folder: {},
+      '@microsoft.graph.conflictBehavior': 'fail',
+    });
+  });
+
+  test('uploads in chunks with exact ranges, sending no token to the upload URL', async () => {
+    const path = join(dir, 'file.bin');
+    await writeFile(path, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+    const { graph, calls } = fakeGraph((call) => {
+      if (call.url.endsWith('/createUploadSession')) return Response.json({ uploadUrl: 'https://upload.test/session' });
+      if (call.contentRange === 'bytes 8-9/10') return item('file', { size: 10 });
+      return Response.json({ nextExpectedRanges: [] }, { status: 202 });
+    });
+
+    const saved = await graph.upload('parent', 'a b.bin', path, 10);
+    assert.equal(saved.id, 'file');
+    assert.equal(calls[0]?.url, `${API}/items/parent:/a%20b.bin:/createUploadSession`);
+    const chunks = calls.slice(1);
     assert.deepEqual(
-      { ...record(drive), updatedAt: 'x' },
-      { tool: 'discord-archive-tool-cli', schema: 1, guildId: GUILD, categoryId: CATEGORY, categoryName: 'Archive: November 2026', status: 'uploaded', updatedAt: 'x' },
+      chunks.map((call) => [call.contentRange, [...(call.body ?? [])], call.authorization]),
+      [
+        ['bytes 0-3/10', [1, 2, 3, 4], null],
+        ['bytes 4-7/10', [5, 6, 7, 8], null],
+        ['bytes 8-9/10', [9, 10], null],
+      ],
     );
   });
 
-  test('saves progress after every file and resumes without sending finished files again', async () => {
-    const drive = fakeDrive();
-    drive.folder('Team/Archives');
-    const run = state();
-    const saves: number[] = [];
-    await upload(drive, run, saves);
-    assert.deepEqual(saves, [1, 2, 3, 4, 5]);
-
-    await writeFile(join(treeDir, 'case-one', 'case-one.html'), 'page, re-rendered');
-    await writeManifest(treeDir);
-    drive.writes.length = 0;
-    const again = await upload(drive, run);
-    assert.equal(again.skipped, 3);
-    assert.deepEqual(drive.writes, [
-      'Team/Archives/Archive_ November 2026/case-one/case-one.html',
-      `Team/Archives/Archive_ November 2026/${MANIFEST_NAME}`,
-      `Team/Archives/Archive_ November 2026/${RUN_RECORD}`,
-    ]);
-  });
-
-  test('sends everything again if the folder was replaced since the last run', async () => {
-    const drive = fakeDrive();
-    drive.folder('Team/Archives');
-    const run = state();
-    await upload(drive, run);
-    run.upload = { destination: 'onedrive', folderId: 'a-folder-that-is-gone', webUrl: '', files: { ...run.upload?.files } };
-    const again = await upload(drive, run);
-    assert.equal(again.uploaded, 5);
-  });
-
-  test('stops if the archive root does not exist, rather than creating a mistyped path', async () => {
-    await assert.rejects(
-      upload(fakeDrive()),
-      /OneDrive folder "Team\/Archives" was not found in the OneDrive of Archive Owner <owner@example.test>/,
+  test('uploads an empty file with a plain PUT, since a session cannot take one', async () => {
+    const path = join(dir, 'empty.txt');
+    await writeFile(path, '');
+    const { graph, calls } = fakeGraph(() => item('empty', { size: 0 }));
+    await graph.upload('parent', 'empty.txt', path, 0);
+    assert.deepEqual(
+      calls.map((call) => [call.method, call.url]),
+      [['PUT', `${API}/items/parent:/empty.txt:/content`]],
     );
-  });
-
-  test('never writes into a folder it did not create', async () => {
-    const drive = fakeDrive();
-    drive.folder('Team/Archives/Archive_ November 2026');
-    await assert.rejects(upload(drive), /that this tool didn't create/);
-    assert.deepEqual(drive.writes, []);
-  });
-
-  test('never merges two categories that share a name', async () => {
-    const drive = fakeDrive();
-    drive.folder('Team/Archives');
-    await upload(drive);
-    drive.writes.length = 0;
-    await assert.rejects(upload(drive, { ...state(), categoryId: '100000000000000099' }), /for a different category/);
-    assert.deepEqual(drive.writes, []);
-  });
-
-  test('never changes an archive that is already verified', async () => {
-    const drive = fakeDrive();
-    const folder = drive.folder('Team/Archives/Archive_ November 2026');
-    const verified: RunRecord = {
-      tool: 'discord-archive-tool-cli',
-      schema: 1,
-      guildId: GUILD,
-      categoryId: CATEGORY,
-      categoryName: 'Archive: November 2026',
-      status: 'verified',
-      updatedAt: '2026-11-01T00:00:00.000Z',
-    };
-    drive.add(folder.id, RUN_RECORD, false, new TextEncoder().encode(JSON.stringify(verified)));
-    await assert.rejects(upload(drive), /already verified/);
-    assert.deepEqual(drive.writes, []);
-  });
-
-  test('treats an unreadable run record as someone else’s folder', async () => {
-    const drive = fakeDrive();
-    const folder = drive.folder('Team/Archives/Archive_ November 2026');
-    drive.add(folder.id, RUN_RECORD, false, new TextEncoder().encode('not json'));
-    await assert.rejects(upload(drive), /for a different category/);
-  });
-
-  test('retries a failed file, then stops if it keeps failing', async () => {
-    const drive = fakeDrive();
-    drive.folder('Team/Archives');
-    const real = drive.graph.upload;
-    let failures = 2;
-    drive.graph.upload = async (...args) => {
-      if (failures-- > 0) throw new Error('connection reset');
-      return real(...args);
-    };
-    assert.equal((await upload(drive)).uploaded, 5);
-
-    drive.graph.upload = async () => {
-      throw new Error('connection reset');
-    };
-    await writeFile(join(treeDir, '_index.html'), 'changed');
-    await writeManifest(treeDir);
-    await assert.rejects(upload(drive), /connection reset/);
-  });
-});
-
-describe('preflightOneDrive', () => {
-  const owner = { guildId: GUILD, categoryId: CATEGORY };
-  const run = (drive: FakeDrive, categoryId = CATEGORY) =>
-    preflightOneDrive(drive.graph, 'Team/Archives', 'Archive: November 2026', { ...owner, categoryId }, () => {});
-
-  test('passes for a new archive or one of ours still in progress, and writes nothing', async () => {
-    const drive = fakeDrive();
-    drive.folder('Team/Archives');
-    await run(drive);
-    assert.deepEqual(drive.writes, []);
-
-    await upload(drive);
-    drive.writes.length = 0;
-    await run(drive);
-    assert.deepEqual(drive.writes, []);
-  });
-
-  test('stops before capture for a missing root, a folder that is not ours, or another category', async () => {
-    await assert.rejects(run(fakeDrive()), /was not found/);
-
-    const foreign = fakeDrive();
-    foreign.folder('Team/Archives/Archive_ November 2026');
-    await assert.rejects(run(foreign), /that this tool didn't create/);
-
-    const other = fakeDrive();
-    other.folder('Team/Archives');
-    await upload(other);
-    await assert.rejects(run(other, '100000000000000099'), /for a different category/);
   });
 });

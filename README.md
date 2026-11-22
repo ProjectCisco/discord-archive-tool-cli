@@ -44,15 +44,18 @@ Each chat page shows who said what and when (in UTC), replies, forwards, edits, 
 
 | Destination | Status |
 |---|---|
-| Microsoft OneDrive | Archive, verify and delete work |
+| Microsoft OneDrive (`--to onedrive`) | Archive, verify and delete work |
+| Google Drive (`--to google-drive`) | Archive, verify and delete work |
 | Local folder on your computer | Planned |
-| Google Drive | Planned |
 
 ## Requirements
 
 - **Node.js 24.22.3** or a later 24.x release. `npm install` refuses other versions.
 - **Your own Discord application** (bot), added to your server, with **Message Content Intent** turned on in the Developer Portal.
-- For OneDrive: a **Microsoft Entra app registration** with *Allow public client flows* turned on and the delegated `Files.ReadWrite` permission. You sign in with a code each time you run the tool. No Microsoft password or secret is stored.
+- For OneDrive: a **Microsoft Entra app registration** with *Allow public client flows* turned on and the delegated `Files.ReadWrite` permission.
+- For Google Drive: a **Google Cloud project** with the **Google Drive API** turned on and an **OAuth client ID** of type *TVs and Limited Input devices*. The tool asks only for the `drive.file` permission: it can see and change only the files it creates, nothing else in your Drive.
+
+Either way, you sign in with a short code each time you run the tool. No password or token is stored.
 
 ## Setup
 
@@ -77,25 +80,27 @@ This saves every channel, thread and forum post in the category to `ARCHIVER_DAT
 
 If it stops part-way, run the same command again. Channels already saved are skipped.
 
-To archive to OneDrive:
+To archive:
 
 ```sh
 npm start -- archive <categoryId> --to onedrive
+npm start -- archive <categoryId> --to google-drive
 ```
 
-It shows a code to sign in with at microsoft.com/devicelogin first: sign in with the account that owns `ONEDRIVE_ROOT`. It checks the OneDrive folder can be used, then captures, uploads to `ONEDRIVE_ROOT/<category name>/`, and verifies:
+It shows a code to sign in with first. It checks the destination folder can be used, then captures, uploads to `<root>/<category name>/`, and verifies:
 
 1. **Complete capture**: no channel, thread, post or message appeared in Discord since capture, and Discord's message count for each thread matches.
 2. **Files downloaded**: every local file matches the manifest, and every attachment is the size Discord reported.
-3. **Upload intact**: every file is downloaded back from OneDrive and matches its SHA-256 checksum, and OneDrive holds nothing extra.
-4. **Folders reachable**: the archive folder and every channel folder have an address in OneDrive.
+3. **Upload intact**: every file is downloaded back and matches its SHA-256 checksum, and the folder holds nothing extra.
+4. **Folders reachable**: the archive folder and every channel folder have an address you can open.
 
-If all four pass, `_run.json` in OneDrive is set to `verified`, an entry goes in `ARCHIVER_DATA_DIR/audit.jsonl`, and a summary is posted to `DISCORD_LOG_CHANNEL_ID`. It then lists the channels, counts down 10 seconds (Ctrl+C stops it), checks once more, and deletes them (see below). Add `--keep` to archive without deleting. If any check fails, it lists every problem, the archive stays unverified, and nothing is deleted.
+If all four pass, `_run.json` in the archive folder is set to `verified`, an entry goes in `ARCHIVER_DATA_DIR/audit.jsonl`, and a summary is posted to `DISCORD_LOG_CHANNEL_ID`. It then lists the channels, counts down 10 seconds (Ctrl+C stops it), checks once more, and deletes them (see below). Add `--keep` to archive without deleting. If any check fails, it lists every problem, the archive stays unverified, and nothing is deleted.
 
-- `ONEDRIVE_ROOT` must already exist. The tool won't create it, so a typo can't scatter archives.
+- **OneDrive:** `ONEDRIVE_ROOT` must already exist. The tool won't create it, so a typo can't scatter archives.
+- **Google Drive:** the tool can only see folders it made itself, so on the first run it creates `GOOGLE_DRIVE_ROOT` in your My Drive. Move or share that folder as you like; the tool still finds it. A folder you made yourself with the same name is invisible to it.
 - The tool only writes into a folder it created itself for this same category (it leaves a `_run.json` there to tell). It refuses a folder with the same name made by anyone else, or for a different category, and it never changes an archive that is already verified.
 - If it stops part-way, run the same command again. Files already uploaded are skipped.
-- OneDrive's browser preview can't follow links between pages or show images. Download the folder, or use the OneDrive sync app, to browse an archive.
+- Browser previews in OneDrive and Google Drive can't follow links between pages or show images. Download the folder, or use the sync app, to browse an archive.
 
 Each file attached to a message must download at exactly the size Discord reports, or the capture stops. Images shown in link previews and stickers are saved when possible; any that can't be saved are listed in `_index.html`.
 

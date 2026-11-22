@@ -16,14 +16,14 @@ It reads nothing outside the category you name.
 ## Where it goes
 
 - **Your computer**, in the folder you set as `ARCHIVER_DATA_DIR`. This is a working copy and a local backup.
-- **The destination you choose**, for example your OneDrive.
+- **The destination you choose**: your OneDrive or your Google Drive.
 
 That is all. The tool has **no telemetry, no analytics and no tracking**. It makes network calls only to Discord and to your chosen destination.
 
 ## What it never does
 
 - send data anywhere other than the destination you configure
-- store your Discord token, Microsoft password, sign-in codes or Microsoft tokens in an archive, a log or on disk. Microsoft tokens are held in memory for one run only
+- store your Discord token, your Microsoft or Google password, sign-in codes or tokens in an archive, a log or on disk. Tokens are held in memory for one run only
 - write message content to its logs
 - load anything from the internet when you open a chat page
 

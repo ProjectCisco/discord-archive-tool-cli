@@ -13,7 +13,8 @@ Only the latest commit on `main` is supported.
 ## How the tool handles secrets
 
 - The Discord bot token is read from `.env`, which `.gitignore` excludes from git. It is never written to logs, archives, run state or Discord messages.
-- Microsoft sign-in uses a device code each time you run the tool. No password, client secret or refresh token is stored on disk.
+- Microsoft and Google sign-in use a device code each time you run the tool. No password or token is stored on disk. Google's client secret for this client type can't really be kept secret; it lives in `.env` with everything else.
+- Google Drive access is limited to the `drive.file` permission: only files the tool creates.
 - Errors name a setting that is missing or invalid, never its value.
 
 ## Keeping your setup safe

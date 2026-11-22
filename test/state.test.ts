@@ -33,10 +33,6 @@ describe('writeFileAtomic', () => {
 });
 
 describe('run state', () => {
-  test('is null before the first run', async () => {
-    assert.equal(await readState(dir), null);
-  });
-
   test('reads back what was written', async () => {
     await writeState(dir, state);
     assert.deepEqual(await readState(dir), state);

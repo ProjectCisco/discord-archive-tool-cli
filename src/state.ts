@@ -1,5 +1,6 @@
 import { open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { Destination } from './config.ts';
 import type { IndexEntry } from './render.ts';
 import type { Check, RemoteFile } from './verify.ts';
 
@@ -22,7 +23,7 @@ export interface RunState {
   // Keyed by channel ID. A channel appears here only once it is fully on disk.
   channels: Record<string, CapturedChannel>;
   upload?: {
-    destination: 'onedrive';
+    destination: Destination;
     folderId: string;
     webUrl: string;
     // Path in the archive → SHA-256 of the copy that was uploaded. A changed file is sent again.

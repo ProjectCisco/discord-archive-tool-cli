@@ -2,14 +2,16 @@ import { mkdir } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { captureCategory } from './capture.ts';
-import { countdown } from './countdown.ts';
-import { DESTINATIONS, isSnowflake, loadConfig, type Config, type Destination } from './config.ts';
+import { preflight, readRunRecord, uploadArchive, writeRunRecord } from './archive-folder.ts';
 import { audit } from './audit.ts';
-import { preflightOneDrive, readRunRecord, uploadToOneDrive, writeRunRecord } from './destinations/onedrive.ts';
-import { createDiscord } from './discord.ts';
-import { createGraph } from './graph.ts';
-import { signIn } from './microsoft.ts';
+import { captureCategory } from './capture.ts';
+import { DESTINATIONS, isSnowflake, loadConfig, type Config, type Destination } from './config.ts';
+import { countdown } from './countdown.ts';
+import { createGoogleDrive } from './destinations/google-drive.ts';
+import { createOneDrive } from './destinations/onedrive.ts';
+import type { Store } from './destinations/store.ts';
+import { googleProvider, microsoftProvider, signIn } from './device-code.ts';
+import { createDiscord, type Discord } from './discord.ts';
 import { safeName } from './names.ts';
 import { deleteChannels, plan, recheck, refusal } from './remove.ts';
 import { runReport, type DeleteOutcome } from './report.ts';
@@ -18,13 +20,16 @@ import { count } from './text.ts';
 import { verifyArchive } from './verify.ts';
 
 const USAGE = `Usage:
-  npm start -- capture <categoryId>                        Save a category to ARCHIVER_DATA_DIR. Uploads and deletes nothing.
-  npm start -- archive <categoryId> --to onedrive          Capture, upload, verify, then delete the category's channels.
-  npm start -- archive <categoryId> --to onedrive --keep   The same, but keep the channels.
-  npm start -- delete <categoryId> --dry-run               Check again that the archive is complete and intact. Deletes nothing.
-  npm start -- delete <categoryId>                         Delete later, or carry on after a stop. Checks again first.`;
+  npm start -- capture <categoryId>                     Save a category locally. Uploads and deletes nothing.
+  npm start -- archive <categoryId> --to <destination>  Capture, upload, verify, then delete the category's channels.
+  npm start -- archive <categoryId> --to <destination> --keep   The same, but keep the channels.
+  npm start -- delete <categoryId> --dry-run            Check again that the archive is complete and intact.
+  npm start -- delete <categoryId>                      Delete later, or carry on after a stop. Checks again first.
+
+Destinations: ${DESTINATIONS.join(', ')}`;
 
 const COUNTDOWN_SECONDS = 10;
+const log = (line: string) => console.log(line);
 
 async function withRun(config: Config, categoryId: string, work: (runDir: string) => Promise<void>): Promise<void> {
   const runDir = join(config.dataDir, 'runs', categoryId);
@@ -37,139 +42,120 @@ async function withRun(config: Config, categoryId: string, work: (runDir: string
   }
 }
 
-async function capture(config: Config, categoryId: string, runDir: string) {
-  const result = await captureCategory({
-    discord: createDiscord(config.discordToken),
-    categoryId,
-    runDir,
-    operator: userInfo().username,
-    log: (line) => console.log(line),
-  });
-  console.log(`\nCaptured "${result.categoryName}": ${result.channels} channels, ${result.messages} messages, ${result.files} files.`);
-  if (result.converted > 0) {
-    console.log(`Saved as the original upload (Discord lists a converted copy): ${result.converted}. See _index.html.`);
-  }
-  if (result.misses.length > 0) console.log(`Not saved (best effort only): ${result.misses.length}. See _index.html.`);
+async function capture(discord: Discord, categoryId: string, runDir: string) {
+  const result = await captureCategory({ discord, categoryId, runDir, operator: userInfo().username, log });
+  log(`\nCaptured "${result.categoryName}": ${count(result.channels, 'channel')}, ${count(result.messages, 'message')}, ${count(result.files, 'file')}.`);
+  if (result.converted > 0) log(`Saved as the original upload (Discord lists a converted copy): ${result.converted}. See _index.html.`);
+  if (result.misses.length > 0) log(`Not saved (best effort only): ${result.misses.length}. See _index.html.`);
   return result;
 }
 
-async function microsoft(config: Config) {
-  const oneDrive = config.oneDrive;
-  if (!oneDrive) throw new Error('OneDrive settings are missing');
-  console.log('Sign in to Microsoft:');
-  const tokens = await signIn({ tenantId: oneDrive.tenantId, clientId: oneDrive.clientId, say: (line) => console.log(line) });
-  console.log('Signed in.');
-  return { oneDrive, graph: createGraph({ tokens }) };
+async function openStore(config: Config, destination: Destination): Promise<Store> {
+  if (destination === 'onedrive') {
+    const settings = config.oneDrive;
+    if (!settings) throw new Error('OneDrive settings are missing');
+    const tokens = await signIn({ provider: microsoftProvider(settings.tenantId, settings.clientId), say: log });
+    log('Signed in.');
+    return createOneDrive({ token: tokens.token, root: settings.root });
+  }
+  const settings = config.googleDrive;
+  if (!settings) throw new Error('Google Drive settings are missing');
+  const tokens = await signIn({ provider: googleProvider(settings.clientId, settings.clientSecret), say: log });
+  log('Signed in.');
+  return createGoogleDrive({ token: tokens.token, rootName: settings.root, log });
 }
 
-// One action: capture, upload, verify, then offer to delete. A run that stopped part-way, or
-// was kept without deleting, carries on from where it was.
-async function archive(config: Config, categoryId: string, runDir: string, keep: boolean): Promise<void> {
+// One action: capture, upload, verify, then delete. A run that stopped part-way, or kept its
+// channels, carries on from where it was.
+async function archive(config: Config, destination: Destination, categoryId: string, runDir: string, keep: boolean): Promise<void> {
   const before = await readState(runDir);
-  if (before?.deletion?.finishedAt) {
-    throw new Error(`This category is already archived and deleted: ${before.upload?.webUrl ?? runDir}`);
+  if (before?.deletion?.finishedAt) throw new Error(`This category is already archived and deleted: ${before.upload?.webUrl ?? runDir}`);
+  if (before?.upload && before.upload.destination !== destination) {
+    throw new Error(`This category is being archived to ${before.upload.destination}. One category goes to one destination.`);
   }
   const discord = createDiscord(config.discordToken);
-  const { oneDrive, graph } = await microsoft(config);
+  const store = await openStore(config, destination);
 
   if (before?.verification?.status === 'verified') {
-    console.log(`\nAlready archived and verified: ${before.upload?.webUrl ?? ''}`);
-    await deleteAndReport({ config, runDir, state: before, discord, graph, dryRun: keep, checkFirst: true });
+    log(`\nAlready archived and verified: ${before.upload?.webUrl ?? ''}`);
+    if (!keep) await deleteAndReport({ config, runDir, state: before, discord, store, dryRun: false, checkFirst: true });
     return;
   }
 
   // Check the destination before spending time on the capture.
   const category = await discord.channel(categoryId);
   if (!category.guild_id) throw new Error(`${categoryId} is not a channel in a server`);
-  await preflightOneDrive(graph, oneDrive.root, category.name, { guildId: category.guild_id, categoryId }, (line) =>
-    console.log(line),
-  );
+  await preflight(store, category.name, { guildId: category.guild_id, categoryId }, log);
 
-  console.log('');
-  const { treeDir } = await capture(config, categoryId, runDir);
+  log('');
+  const { treeDir } = await capture(discord, categoryId, runDir);
   const state = await readState(runDir);
   if (!state) throw new Error(`No run state in ${runDir} after capture`);
 
-  console.log('\nUploading…');
-  const result = await uploadToOneDrive({
-    graph,
-    root: oneDrive.root,
-    treeDir,
-    state,
-    save: () => writeState(runDir, state),
-    log: (line) => console.log(line),
-  });
-  console.log(
-    `\nUploaded to OneDrive: ${oneDrive.root}/${result.folderName} (${result.uploaded} files sent, ${result.skipped} already there).`,
-  );
-  console.log(result.webUrl);
+  log('\nUploading…');
+  const result = await uploadArchive({ store, destination, treeDir, state, save: () => writeState(runDir, state), log });
+  log(`\nUploaded to ${store.label}: ${result.folderName} (${result.uploaded} files sent, ${result.skipped} already there).`);
+  log(result.webUrl);
 
   const folderId = state.upload?.folderId;
   if (!folderId) throw new Error('Upload finished without a folder ID');
-  console.log('\nVerifying…');
-  const verified = await verifyArchive({ discord, graph, state, treeDir, folderId, log: (line) => console.log(line) });
-  const entry = auditBase(state, `${oneDrive.root}/${result.folderName}`);
+  log('\nVerifying…');
+  const verified = await verifyArchive({ discord, store, state, treeDir, folderId, log });
+  const entry = auditBase(state, result.folderName);
   const at = new Date().toISOString();
 
   if (!verified.passed) {
     state.verification = { status: 'failed', at, checks: verified.checks, remote: verified.remote };
     await writeState(runDir, state);
-    await audit(config.dataDir, {
-      event: 'archive-failed',
-      ...entry,
-      failedChecks: verified.checks.filter((item) => !item.passed).map((item) => item.name),
-    });
-    for (const item of verified.checks.filter((failed) => !failed.passed)) {
-      console.log(`\n✗ ${item.name}`);
-      for (const problem of item.problems) console.log(`  - ${problem}`);
+    const failed = verified.checks.filter((item) => !item.passed);
+    await audit(config.dataDir, { event: 'archive-failed', ...entry, failedChecks: failed.map((item) => item.name) });
+    for (const item of failed) {
+      log(`\n✗ ${item.name}`);
+      for (const problem of item.problems) log(`  - ${problem}`);
     }
-    throw new Error(
-      'Verification failed, so nothing was deleted. ' +
-        `If Discord changed since capture, delete ${runDir} and run archive again.`,
-    );
+    throw new Error(`Verification failed, so nothing was deleted. If Discord changed since capture, delete ${runDir} and run archive again.`);
   }
 
-  const checks = verified.checks.map((item) => ({ name: item.name, passed: item.passed }));
-  await writeRunRecord(graph, folderId, state, 'verified', checks);
+  await writeRunRecord(store, folderId, state, 'verified', verified.checks.map(({ name, passed }) => ({ name, passed })));
   // The run record is what marks the folder as finished, so read it back before trusting it.
-  if ((await readRunRecord(graph, folderId))?.status !== 'verified') {
-    throw new Error('The run record in OneDrive did not read back as verified');
+  if ((await readRunRecord(store, folderId))?.status !== 'verified') {
+    throw new Error(`The run record in ${store.label} did not read back as verified`);
   }
   state.verification = { status: 'verified', at, checks: verified.checks, remote: verified.remote };
   await writeState(runDir, state);
   await audit(config.dataDir, { event: 'archive-verified', ...entry });
-  console.log('\n✓ Verified: all 4 checks passed.');
+  log('\n✓ Verified: all 4 checks passed.');
+
   if (keep) {
-    console.log('Kept the channels (--keep). Run delete later to remove them.');
-    await post(discord, config, report(state, { status: 'kept' }));
+    log('Kept the channels (--keep). Run delete later to remove them.');
+    await post(discord, config, report(state, store, { status: 'kept' }));
     return;
   }
-  await deleteAndReport({ config, runDir, state, discord, graph, dryRun: false, checkFirst: false });
+  // Verify has only just run, so the re-check before the list would repeat it. The one after the
+  // countdown stays.
+  await deleteAndReport({ config, runDir, state, discord, store, dryRun: false, checkFirst: false });
 }
 
-// The archive is verified either way; a missing post must not hide that.
-async function post(discord: ReturnType<typeof createDiscord>, config: Config, messages: string[]): Promise<void> {
-  try {
-    for (const message of messages) await discord.post(config.logChannelId, message);
-    console.log('Posted the summary to the log channel.');
-  } catch (error) {
-    console.log(`Couldn't post to the log channel: ${(error as Error).message}`);
-  }
+// The standalone command: delete later, carry on after a stop, or --dry-run to check only.
+async function remove(config: Config, runDir: string, dryRun: boolean): Promise<void> {
+  const state = await readState(runDir);
+  const refused = refusal(state);
+  if (refused || !state?.upload) throw new Error(refused ?? 'No verified upload');
+  const store = await openStore(config, state.upload.destination);
+  const discord = createDiscord(config.discordToken);
+  const outcome = await deleteStage({ config, runDir, state, discord, store, dryRun, checkFirst: true });
+  // Stopping or a dry run changes nothing, so only a delete is posted.
+  if (outcome?.status === 'deleted') await post(discord, config, report(state, store, outcome));
 }
 
-function report(state: RunState, outcome: DeleteOutcome): string[] {
-  const records = Object.values(state.channels);
-  return runReport({
-    categoryName: state.categoryName,
-    destination: 'OneDrive',
-    webUrl: state.upload?.webUrl ?? '',
-    channels: records.map((record) => ({ name: record.entry.name, messages: record.entry.messages })),
-    messages: records.reduce((sum, record) => sum + record.entry.messages, 0),
-    files: records.reduce((sum, record) => sum + record.entry.files, 0),
-    operator: userInfo().username,
-    at: new Date(),
-    outcome,
-  });
+interface DeleteStage {
+  config: Config;
+  runDir: string;
+  state: RunState;
+  discord: Discord;
+  store: Store;
+  dryRun: boolean;
+  checkFirst: boolean;
 }
 
 // One post per run, once the channels' fate is known. A refused delete is posted too: the
@@ -179,90 +165,53 @@ async function deleteAndReport(stage: DeleteStage): Promise<void> {
   try {
     outcome = await deleteStage(stage);
   } catch (error) {
-    await post(stage.discord, stage.config, report(stage.state, { status: 'refused' }));
+    await post(stage.discord, stage.config, report(stage.state, stage.store, { status: 'refused' }));
     throw error;
   }
-  if (outcome) await post(stage.discord, stage.config, report(stage.state, outcome));
-}
-
-function auditBase(state: RunState, folder: string) {
-  const records = Object.values(state.channels);
-  return {
-    operator: userInfo().username,
-    guildId: state.guildId,
-    categoryId: state.categoryId,
-    categoryName: state.categoryName,
-    folder,
-    webUrl: state.upload?.webUrl ?? '',
-    channels: records.length,
-    messages: records.reduce((sum, record) => sum + record.entry.messages, 0),
-    files: records.reduce((sum, record) => sum + record.entry.files, 0),
-  };
-}
-
-// The standalone command: delete later, carry on after a stop, or --dry-run to check only.
-async function remove(config: Config, runDir: string, dryRun: boolean): Promise<void> {
-  const state = await readState(runDir);
-  const refused = refusal(state);
-  if (refused || !state) throw new Error(refused ?? 'No archive');
-  const { graph } = await microsoft(config);
-  const discord = createDiscord(config.discordToken);
-  const outcome = await deleteStage({ config, runDir, state, discord, graph, dryRun, checkFirst: true });
-  // Stopping or a dry run changes nothing, so only a delete is posted.
-  if (outcome?.status === 'deleted') await post(discord, config, report(state, outcome));
-}
-
-interface DeleteStage {
-  config: Config;
-  runDir: string;
-  state: RunState;
-  discord: ReturnType<typeof createDiscord>;
-  graph: ReturnType<typeof createGraph>;
-  dryRun: boolean;
-  checkFirst: boolean;
+  if (outcome) await post(stage.discord, stage.config, report(stage.state, stage.store, outcome));
 }
 
 // Null for a dry run. Throws, deleting nothing, if the re-check finds a change.
-async function deleteStage({ config, runDir, state, discord, graph, dryRun, checkFirst }: DeleteStage): Promise<DeleteOutcome | null> {
+async function deleteStage({ config, runDir, state, discord, store, dryRun, checkFirst }: DeleteStage): Promise<DeleteOutcome | null> {
   const refused = refusal(state);
   if (refused || !state.upload) throw new Error(refused ?? 'No verified upload');
   const upload = state.upload;
-  const base = auditBase(state, `${config.oneDrive?.root ?? ''}/${safeName(state.categoryName)}`);
+  const base = auditBase(state, safeName(state.categoryName));
   const treeDir = join(runDir, 'tree');
 
   const check = async () => {
-    console.log('Checking Discord and OneDrive again…');
-    const { problems } = await recheck({ discord, graph, state, treeDir });
+    log(`Checking Discord and ${store.label} again…`);
+    const problems = await recheck({ discord, store, state, treeDir });
     if (problems.length === 0) return;
-    for (const problem of problems) console.log(`  ✗ ${problem}`);
+    for (const problem of problems) log(`  ✗ ${problem}`);
     if (!dryRun) await audit(config.dataDir, { event: 'delete-refused', ...base, problems });
     throw new Error(
       'Nothing was deleted: something changed since the archive was verified. A verified archive is never changed, ' +
-        `so to include the change, delete the archive folder in OneDrive and ${runDir}, then run archive again.`,
+        `so to include the change, delete the archive folder in ${store.label} and ${runDir}, then run archive again.`,
     );
   };
   if (checkFirst) await check();
 
   const planned = plan(state);
-  console.log(`\nThese ${count(planned.length, 'channel')} will be deleted from "${state.categoryName}", with their threads and posts:`);
+  log(`\nThese ${count(planned.length, 'channel')} will be deleted from "${state.categoryName}", with their threads and posts:`);
   for (const channel of planned) {
-    console.log(`  #${channel.name}: ${count(channel.messages, 'message')}, ${count(channel.threads, 'thread or post', 'threads or posts')}`);
+    log(`  #${channel.name}: ${count(channel.messages, 'message')}, ${count(channel.threads, 'thread or post', 'threads or posts')}`);
   }
-  console.log(`Archive: ${upload.webUrl}`);
+  log(`Archive: ${upload.webUrl}`);
   if (dryRun) {
-    console.log('\nDry run: every check passed. Nothing was deleted.');
+    log('\nDry run: every check passed. Nothing was deleted.');
     return null;
   }
 
   // No typing (decision D40), but a last chance to stop after seeing the list.
-  console.log('');
+  log('');
   if (!(await countdown(COUNTDOWN_SECONDS, (text) => process.stdout.write(text)))) {
-    console.log('Stopped. Nothing was deleted. Run delete later to remove them.');
+    log('Stopped. Nothing was deleted. Run delete later to remove them.');
     return { status: 'stopped' };
   }
-
   // The last look, straight before the first delete.
   await check();
+
   await audit(config.dataDir, { event: 'delete-confirmed', ...base });
   const result = await deleteChannels({
     discord,
@@ -271,17 +220,63 @@ async function deleteStage({ config, runDir, state, discord, graph, dryRun, chec
     save: () => writeState(runDir, state),
     onDeleted: (channel, outcome) =>
       audit(config.dataDir, { event: 'channel-deleted', ...base, channel: { id: channel.id, name: channel.name, outcome } }),
-    log: (line) => console.log(line),
+    log,
   });
   await audit(config.dataDir, { event: 'delete-done', ...base });
 
-  console.log(`\n✓ Deleted ${count(result.deleted.length, 'channel')}. The category itself was kept.`);
-  if (result.skipped.length > 0) console.log(`Kept ${result.skipped.length} that were moved out of the category.`);
+  log(`\n✓ Deleted ${count(result.deleted.length, 'channel')}. The category itself was kept.`);
+  if (result.skipped.length > 0) log(`Kept ${result.skipped.length} that were moved out of the category.`);
   return {
     status: 'deleted',
     deleted: result.deleted.map((channel) => channel.name),
     kept: result.skipped.map((item) => item.channel.name),
   };
+}
+
+function totals(state: RunState) {
+  const records = Object.values(state.channels);
+  return {
+    channels: records.length,
+    messages: records.reduce((sum, record) => sum + record.entry.messages, 0),
+    files: records.reduce((sum, record) => sum + record.entry.files, 0),
+  };
+}
+
+function auditBase(state: RunState, folder: string) {
+  return {
+    operator: userInfo().username,
+    guildId: state.guildId,
+    categoryId: state.categoryId,
+    categoryName: state.categoryName,
+    folder,
+    webUrl: state.upload?.webUrl ?? '',
+    ...totals(state),
+  };
+}
+
+function report(state: RunState, store: Store, outcome: DeleteOutcome): string[] {
+  const { messages, files } = totals(state);
+  return runReport({
+    categoryName: state.categoryName,
+    destination: store.label,
+    webUrl: state.upload?.webUrl ?? '',
+    channels: Object.values(state.channels).map((record) => ({ name: record.entry.name, messages: record.entry.messages })),
+    messages,
+    files,
+    operator: userInfo().username,
+    at: new Date(),
+    outcome,
+  });
+}
+
+// The archive is verified either way; a missing post must not hide that.
+async function post(discord: Discord, config: Config, messages: string[]): Promise<void> {
+  try {
+    for (const message of messages) await discord.post(config.logChannelId, message);
+    log('Posted the summary to the log channel.');
+  } catch (error) {
+    log(`Couldn't post to the log channel: ${(error as Error).message}`);
+  }
 }
 
 async function main(): Promise<void> {
@@ -290,7 +285,7 @@ async function main(): Promise<void> {
     options: { to: { type: 'string' }, 'dry-run': { type: 'boolean' }, keep: { type: 'boolean' } },
   });
   const [command, categoryId, ...extra] = positionals;
-  const to = values.to;
+  const { to } = values;
   const dryRun = values['dry-run'] === true;
   const keep = values.keep === true;
   const valid =
@@ -300,7 +295,7 @@ async function main(): Promise<void> {
       (command === 'archive' && to !== undefined && !dryRun) ||
       (command === 'delete' && to === undefined && !keep));
   if (!valid) {
-    console.log(USAGE);
+    log(USAGE);
     process.exitCode = 2;
     return;
   }
@@ -309,24 +304,26 @@ async function main(): Promise<void> {
   if (command === 'capture') {
     const config = loadConfig(process.env, null);
     await withRun(config, categoryId, async (runDir) => {
-      const result = await capture(config, categoryId, runDir);
-      console.log(`Open ${join(result.treeDir, '_index.html')}`);
+      const result = await capture(createDiscord(config.discordToken), categoryId, runDir);
+      log(`Open ${join(result.treeDir, '_index.html')}`);
     });
     return;
   }
 
   if (command === 'delete') {
-    // The run state says where the archive went; today that is always OneDrive.
-    const config = loadConfig(process.env, 'onedrive');
+    // The run state says where the archive went, so read it before loading that destination's settings.
+    const core = loadConfig(process.env, null);
+    const destination = (await readState(join(core.dataDir, 'runs', categoryId)))?.upload?.destination;
+    if (!destination) throw new Error('No archive of this category exists on this computer. Run archive first.');
+    const config = loadConfig(process.env, destination);
     await withRun(config, categoryId, (runDir) => remove(config, runDir, dryRun));
     return;
   }
 
-  if (!DESTINATIONS.includes(to as Destination)) {
-    throw new Error(`--to must be one of: ${DESTINATIONS.join(', ')}`);
-  }
-  const config = loadConfig(process.env, to as Destination);
-  await withRun(config, categoryId, (runDir) => archive(config, categoryId, runDir, keep));
+  const destination = DESTINATIONS.find((name) => name === to);
+  if (!destination) throw new Error(`--to must be one of: ${DESTINATIONS.join(', ')}`);
+  const config = loadConfig(process.env, destination);
+  await withRun(config, categoryId, (runDir) => archive(config, destination, categoryId, runDir, keep));
 }
 
 main().catch((error: unknown) => {
