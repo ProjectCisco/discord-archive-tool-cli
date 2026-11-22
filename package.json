@@ -9,14 +9,19 @@
     "node": ">=24.22.3 <25"
   },
   "scripts": {
+    "start": "node --env-file=.env src/cli.ts",
     "check": "tsc --noEmit",
     "test": "node --test \"test/*.test.ts\""
   },
   "dependencies": {
+    "@discordjs/rest": "2.6.3",
     "discord-api-types": "0.38.60"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
     "typescript": "7.0.2"
+  },
+  "overrides": {
+    "undici": "^6.29.1"
   }
 }

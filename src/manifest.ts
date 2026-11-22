@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
+import { readdir } from 'node:fs/promises';
+import { join, relative, sep } from 'node:path';
+import { writeFileAtomic } from './state.ts';
+
+export const MANIFEST_NAME = '_manifest-sha256.txt';
 
 export interface ManifestEntry {
   path: string;
@@ -34,4 +39,18 @@ export function parseManifest(text: string): Map<string, string> {
     entries.set(path, sha256);
   }
   return entries;
+}
+
+// Every file under `root` except the manifest itself, with forward-slash paths on every OS.
+export async function writeManifest(root: string): Promise<number> {
+  const items = await readdir(root, { recursive: true, withFileTypes: true });
+  const paths = items
+    .filter((item) => item.isFile())
+    .map((item) => relative(root, join(item.parentPath, item.name)).split(sep).join('/'))
+    .filter((path) => path !== MANIFEST_NAME);
+
+  const entries: ManifestEntry[] = [];
+  for (const path of paths) entries.push({ path, sha256: await sha256File(join(root, path)) });
+  await writeFileAtomic(join(root, MANIFEST_NAME), formatManifest(entries));
+  return entries.length;
 }

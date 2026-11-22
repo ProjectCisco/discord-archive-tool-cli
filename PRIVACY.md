@@ -25,7 +25,7 @@ That is all. The tool has **no telemetry, no analytics and no tracking**. It mak
 - send data anywhere other than the destination you configure
 - store your Discord token, Microsoft password or sign-in codes in an archive or log
 - write message content to its logs
-- load anything from the internet when you open a transcript
+- load anything from the internet when you open a chat page
 
 ## Your responsibilities
 

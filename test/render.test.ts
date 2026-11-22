@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MessageReferenceType, MessageType } from 'discord-api-types/v10';
-import type { APIChannel, APIMessage } from 'discord-api-types/v10';
-import { escapeHtml, renderCategoryIndex, renderTranscript } from '../src/render.ts';
-import type { Transcript } from '../src/transcript.ts';
+import type { APIMessage } from 'discord-api-types/v10';
+import { escapeHtml } from '../src/html.ts';
+import { renderCategoryIndex, renderTranscript } from '../src/render.ts';
+import type { Thread, Transcript } from '../src/transcript.ts';
 
 const HOSTILE = '<script>alert(1)</script>"\'><img src=x onerror=alert(2)>';
 
@@ -30,14 +31,18 @@ function message(overrides: Partial<APIMessage> & { id: string }): APIMessage {
   } as APIMessage;
 }
 
+function thread(id: string, name: string, startMessageId: string | null, messages: APIMessage[]): Thread {
+  return { channel: { id, name, topic: null, raw: { id } }, messages, startMessageId };
+}
+
 function transcript(messages: APIMessage[], extra: Partial<Transcript> = {}): Transcript {
   return {
     schema: 1,
+    kind: 'channel',
     archivedAt: '2026-11-21T20:00:00.000Z',
     guild: { id: '1', name: 'Example Server' },
     category: { id: '900000000000851068', name: 'Archive November 2026' },
-    channel: { id: '100000000000000001', name: 'case-example', topic: null, raw: { id: '100000000000000001', type: 0 } as APIChannel },
-    parent: null,
+    channel: { id: '100000000000000001', name: 'case-example', topic: null, raw: { id: '100000000000000001', type: 0 } },
     messages,
     resolved: {
       users: { '200000000000000099': { id: '200000000000000099', username: 'bob', displayName: 'Bob' } },
@@ -46,7 +51,7 @@ function transcript(messages: APIMessage[], extra: Partial<Transcript> = {}): Tr
       forwardAuthors: {},
     },
     files: {},
-    threads: {},
+    threads: [],
     ...extra,
   };
 }
@@ -211,7 +216,7 @@ describe('renderTranscript', () => {
     assert.ok(!html.includes('[No text content]'));
   });
 
-  test('shows edits, pins, reactions and thread links', () => {
+  test('shows edits, pins and reactions', () => {
     const html = renderTranscript(
       transcript(
         [
@@ -225,13 +230,59 @@ describe('renderTranscript', () => {
             ],
           }),
         ],
-        { threads: { '500000000000000011': 'threads/follow up/transcript.html' } },
       ),
     );
     assert.match(html, /\(edited 2025-10-19 09:00:00 UTC\)/);
     assert.match(html, /📌 pinned/);
     assert.match(html, /👍 3/);
-    assert.match(html, /href="threads\/follow%20up\/transcript\.html"/);
+  });
+
+  test('links back to the list of channels', () => {
+    assert.match(renderTranscript(transcript([])), /<a href="\.\.\/_index\.html">← All channels<\/a>/);
+  });
+
+  test('shows each thread on the same page, right under the message that started it', () => {
+    const start = message({ id: '500000000000000020', content: 'start here' });
+    const next = message({ id: '500000000000000021', content: 'next in channel' });
+    const html = renderTranscript(
+      transcript([start, next], {
+        threads: [
+          thread('500000000000000020', 'follow up', '500000000000000020', [message({ id: '500000000000000022', content: 'in the thread' })]),
+          thread('500000000000000030', HOSTILE, null, [message({ id: '500000000000000031', content: 'loose thread' })]),
+        ],
+      }),
+    );
+    const order = ['start here', 'id="thread-500000000000000020"', '🧵 follow up', 'in the thread', 'next in channel', 'Other threads', 'loose thread'];
+    const positions = order.map((text) => html.indexOf(text));
+    assert.ok(positions.every((position) => position !== -1), `all present: ${positions}`);
+    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), 'in reading order');
+    assert.match(html, /· 4 messages<\/p>/, 'header counts thread messages too');
+    assert.ok(!html.slice(html.indexOf('<main>')).includes('<script>'), 'thread name is escaped');
+  });
+
+  test('shows a forum as a list of posts, then every post in full', () => {
+    const html = renderTranscript(
+      transcript([], {
+        kind: 'forum',
+        threads: [
+          thread('500000000000000040', 'first appeal', null, [message({ id: '500000000000000040', content: 'appeal text' })]),
+          thread('500000000000000041', 'empty post', null, []),
+        ],
+      }),
+    );
+    assert.match(html, /<h2>2 posts<\/h2>/);
+    assert.match(html, /<a href="#post-500000000000000040">first appeal<\/a> <span class="meta">alice · 2025-10-18 13:08:28 UTC · 1 message<\/span>/);
+    assert.ok(html.indexOf('href="#post-500000000000000041"') < html.indexOf('id="post-500000000000000040"'), 'list comes first');
+    assert.match(html, /id="post-500000000000000040"><h2>first appeal<\/h2>/);
+    assert.match(html, /appeal text/);
+    assert.match(html, /unknown · no messages · 0 messages/);
+  });
+
+  test('renders Discord formatting without letting it inject HTML', () => {
+    const html = renderTranscript(transcript([message({ id: '500000000000000050', content: '**bold** `<b>code</b>` ||secret||' })]));
+    assert.match(html, /<strong>bold<\/strong>/);
+    assert.match(html, /<code>&lt;b&gt;code&lt;\/b&gt;<\/code>/);
+    assert.match(html, /<span class="spoiler"[^>]*>secret<\/span>/);
   });
 
   test('labels system messages', () => {
@@ -251,10 +302,17 @@ describe('renderCategoryIndex', () => {
       categoryId: '900000000000851068',
       archivedAt: '2026-11-21T20:00:00.000Z',
       operator: 'operator',
-      entries: [{ name: 'example-appeal', path: 'example-appeal/transcript.html', messages: 212, files: 9, threads: 1 }],
+      entries: [{ name: 'example appeal', path: 'example appeal/example appeal.html', messages: 212, files: 9, threads: 1 }],
+      converted: 0,
       misses: [],
     });
     assert.ok(!html.includes('<script>'));
-    assert.match(html, /<a href="example-appeal\/transcript\.html">#example-appeal<\/a><\/td><td>212<\/td><td>9<\/td><td>1<\/td>/);
+    assert.match(
+      html,
+      /<a href="example%20appeal\/example%20appeal\.html">#example appeal<\/a><\/td><td>212<\/td><td>9<\/td><td>1<\/td>/,
+    );
+    assert.match(html, /<th>Threads \/ posts<\/th>/);
+    assert.match(html, /Open a channel below/);
+    assert.ok(!html.includes('_run.json'), 'no pointer to a file the archive does not hold');
   });
 });

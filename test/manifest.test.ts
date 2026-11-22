@@ -45,7 +45,7 @@ describe('manifest', () => {
     const dir = await mkdtemp(join(tmpdir(), 'manifest-'));
     try {
       await mkdir(join(dir, 'chan', 'attachments'), { recursive: true });
-      const paths = ['chan/transcript.html', 'chan/attachments/image (2).png'];
+      const paths = ['chan/chan.html', 'chan/attachments/image (2).png'];
       for (const path of paths) await writeFile(join(dir, path), `content of ${path}`);
       const entries = await Promise.all(paths.map(async (path) => ({ path, sha256: await sha256File(join(dir, path)) })));
       await writeFile(join(dir, '_manifest-sha256.txt'), formatManifest(entries));
