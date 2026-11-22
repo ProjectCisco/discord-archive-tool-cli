@@ -23,7 +23,7 @@ That is all. The tool has **no telemetry, no analytics and no tracking**. It mak
 ## What it never does
 
 - send data anywhere other than the destination you configure
-- store your Discord token, Microsoft password or sign-in codes in an archive or log
+- store your Discord token, Microsoft password, sign-in codes or Microsoft tokens in an archive, a log or on disk. Microsoft tokens are held in memory for one run only
 - write message content to its logs
 - load anything from the internet when you open a chat page
 
