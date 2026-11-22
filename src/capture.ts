@@ -160,16 +160,7 @@ async function captureChannel(
   activeThreads: GuildChannel[],
 ): Promise<CapturedChannel> {
   const isForum = FORUM_CHANNELS.has(channel.type);
-  const archived = async (kind: 'public' | 'private') => archivedThreads(context.discord, channel.id, kind);
-  const threadChannels =
-    isForum || THREAD_PARENTS.has(channel.type)
-      ? dedupe([
-          ...activeThreads.filter((thread) => thread.parent_id === channel.id),
-          ...(await archived('public')),
-          // Forum posts are always public.
-          ...(isForum ? [] : await archived('private')),
-        ])
-      : [];
+  const threadChannels = await listThreads(context.discord, channel, activeThreads);
   for (const thread of threadChannels) context.channelNames[thread.id] = thread.name;
 
   await mkdir(dir, { recursive: true });
@@ -406,6 +397,19 @@ function isConvertedCopy(expected: Expected, response: Download, size: number): 
   const fullyReceived = response.contentLength !== null && !response.encoded && size === response.contentLength;
   const sameKind = kind(expected.contentType) !== null && kind(expected.contentType) === kind(response.contentType);
   return fullyReceived && sameKind;
+}
+
+// Every thread or forum post under a channel, active and archived. Verify and delete use this too,
+// so they see exactly what capture saw.
+export async function listThreads(discord: Discord, channel: GuildChannel, activeThreads: GuildChannel[]): Promise<GuildChannel[]> {
+  const isForum = FORUM_CHANNELS.has(channel.type);
+  if (!isForum && !THREAD_PARENTS.has(channel.type)) return [];
+  return dedupe([
+    ...activeThreads.filter((thread) => thread.parent_id === channel.id),
+    ...(await archivedThreads(discord, channel.id, 'public')),
+    // Forum posts are always public.
+    ...(isForum ? [] : await archivedThreads(discord, channel.id, 'private')),
+  ]);
 }
 
 async function archivedThreads(discord: Discord, channelId: string, kind: 'public' | 'private'): Promise<GuildChannel[]> {

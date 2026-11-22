@@ -12,6 +12,8 @@ export interface GuildChannel {
   position?: number;
   topic?: string | null;
   thread_metadata?: { archive_timestamp: string };
+  // Threads only: messages in the thread, not counting its first message or deleted ones.
+  message_count?: number;
 }
 
 export interface Download {
@@ -65,6 +67,11 @@ export function createDiscord(token: string) {
       unlessHidden<APIMessage>(get(Routes.channelMessage(channelId, messageId))),
 
     member: (guildId: string, userId: string) => unlessHidden<APIGuildMember>(get(Routes.guildMember(guildId, userId))),
+
+    // Mentions are switched off: a log post must never ping anyone.
+    post: async (channelId: string, content: string) => {
+      await rest.post(Routes.channelMessages(channelId), { body: { content, allowed_mentions: { parse: [] } } });
+    },
 
     // Attachment URLs are signed and expire, so they are never logged.
     download: async (url: string): Promise<Download> => {

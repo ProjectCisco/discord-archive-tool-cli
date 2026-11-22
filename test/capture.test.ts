@@ -4,198 +4,27 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import { ChannelType, MessageReferenceType, MessageType } from 'discord-api-types/v10';
-import type { APIAttachment, APIMessage } from 'discord-api-types/v10';
+import { MessageReferenceType, MessageType } from 'discord-api-types/v10';
+import type { APIAttachment } from 'discord-api-types/v10';
 import { captureCategory } from '../src/capture.ts';
-import type { Discord, GuildChannel } from '../src/discord.ts';
 import { parseManifest } from '../src/manifest.ts';
 import type { Transcript } from '../src/transcript.ts';
-
-const GUILD = '100000000000000001';
-const CATEGORY = '100000000000000002';
-const TEXT = '100000000000000003';
-const FORUM = '100000000000000004';
-const VOICE = '100000000000000005';
-const PRIVATE_THREAD = '100000000000000006';
-const POST_ACTIVE = '100000000000000007';
-const POST_ARCHIVED = '100000000000000008';
-const POST_ARCHIVED_OLDER = '100000000000000011';
-// Started from message 300000000000000010 in #case-one, so it shares that message's ID.
-const MESSAGE_THREAD = '300000000000000010';
-const ALICE = { id: '200000000000000001', username: 'alice', global_name: 'Alice', discriminator: '0', avatar: null };
-
-const IMAGE = new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]);
-
-function message(id: string, channelId: string, overrides: Partial<APIMessage> = {}): APIMessage {
-  return {
-    id,
-    channel_id: channelId,
-    author: ALICE,
-    content: `message ${id}`,
-    timestamp: '2026-11-01T10:00:00.000000+00:00',
-    edited_timestamp: null,
-    tts: false,
-    mention_everyone: false,
-    mentions: [],
-    mention_roles: [],
-    attachments: [],
-    embeds: [],
-    pinned: false,
-    type: MessageType.Default,
-    ...overrides,
-  } as APIMessage;
-}
-
-function channel(id: string, type: number, name: string, parentId: string | null, extra: Partial<GuildChannel> = {}): GuildChannel {
-  return { id, type, name, guild_id: GUILD, parent_id: parentId, position: Number(id.slice(-1)), ...extra };
-}
-
-interface FakeServer {
-  channels: GuildChannel[];
-  messages: Record<string, APIMessage[]>;
-  activeThreads: GuildChannel[];
-  archived: Record<string, { public: GuildChannel[][]; private: GuildChannel[][] }>;
-  files: Record<string, Uint8Array>;
-  // Response headers per URL. By default a file is served as image/png with its exact Content-Length.
-  headers: Record<string, { contentType?: string | null; contentLength?: number | null; encoded?: boolean }>;
-  calls: string[];
-}
-
-function server(): FakeServer {
-  const attachment = (id: string, url: string, size = IMAGE.byteLength) => ({
-    id,
-    filename: 'image.png',
-    size,
-    url,
-    proxy_url: url,
-    content_type: 'image/png',
-  });
-  // 150 messages forces two pages of 100.
-  const textMessages = Array.from({ length: 150 }, (_, index) =>
-    message(String(300000000000000000n + BigInt(index)), TEXT),
-  );
-  textMessages[0] = message('300000000000000000', TEXT, {
-    content: '',
-    attachments: [attachment('400000000000000001', 'https://cdn.test/a'), attachment('400000000000000002', 'https://cdn.test/expired')],
-  });
-
-  return {
-    channels: [
-      channel(CATEGORY, ChannelType.GuildCategory, 'Archive 2026', null),
-      channel(TEXT, ChannelType.GuildText, 'case-one', CATEGORY),
-      channel(FORUM, ChannelType.GuildForum, 'appeals', CATEGORY),
-      channel(VOICE, ChannelType.GuildVoice, 'hearing', CATEGORY),
-      channel('100000000000000009', ChannelType.GuildText, 'general', null),
-    ],
-    messages: {
-      [TEXT]: textMessages,
-      [VOICE]: [message('310000000000000001', VOICE, { content: 'voice chat text' })],
-      [PRIVATE_THREAD]: [
-        message('320000000000000001', PRIVATE_THREAD, {
-          content: 'private follow-up',
-          attachments: [attachment('400000000000000003', 'https://cdn.test/a')],
-        }),
-      ],
-      [MESSAGE_THREAD]: [message('330000000000000001', MESSAGE_THREAD, { content: 'evidence discussion' })],
-      [POST_ACTIVE]: [message(POST_ACTIVE, POST_ACTIVE, { content: 'appeal opened' })],
-      [POST_ARCHIVED_OLDER]: [message(POST_ARCHIVED_OLDER, POST_ARCHIVED_OLDER, { content: 'oldest appeal' })],
-      [POST_ARCHIVED]: [
-        message(POST_ARCHIVED, POST_ARCHIVED, {
-          content: '',
-          message_reference: { type: MessageReferenceType.Forward, channel_id: TEXT, message_id: '300000000000000005' },
-          message_snapshots: [
-            {
-              message: {
-                type: MessageType.Default,
-                content: 'forwarded evidence',
-                embeds: [],
-                attachments: [],
-                timestamp: '2026-11-01T10:00:00.000000+00:00',
-                edited_timestamp: null,
-                mentions: [],
-                mention_roles: [],
-              },
-            },
-          ],
-        }),
-      ],
-    },
-    activeThreads: [channel(POST_ACTIVE, ChannelType.PublicThread, 'first appeal', FORUM)],
-    archived: {
-      [TEXT]: {
-        public: [[channel(MESSAGE_THREAD, ChannelType.PublicThread, 'evidence', TEXT)]],
-        private: [[channel(PRIVATE_THREAD, ChannelType.PrivateThread, 'staff notes', TEXT)]],
-      },
-      [FORUM]: {
-        // Two pages: the tool must follow has_more.
-        public: [
-          [channel(POST_ARCHIVED, ChannelType.PublicThread, 'old appeal', FORUM)],
-          [channel(POST_ARCHIVED_OLDER, ChannelType.PublicThread, 'oldest appeal', FORUM)],
-        ],
-        private: [],
-      },
-    },
-    files: { 'https://cdn.test/a': IMAGE, 'https://cdn.test/fresh': IMAGE },
-    headers: {},
-    calls: [],
-  };
-}
-
-function fake(world: FakeServer): Discord {
-  const find = (id: string) => [...world.channels, ...world.activeThreads].find((item) => item.id === id);
-  return {
-    channel: async (id) => {
-      const found = find(id);
-      if (!found) throw new Error(`unknown channel ${id}`);
-      return found;
-    },
-    guild: async (id) => ({ id, name: 'Example Server' }),
-    guildChannels: async () => world.channels,
-    roles: async () => [{ id: '500000000000000001', name: 'Moderators' }] as Awaited<ReturnType<Discord['roles']>>,
-    activeThreads: async () => world.activeThreads,
-    archivedThreads: async (channelId, kind, before) => {
-      const pages = world.archived[channelId]?.[kind] ?? [];
-      const index = before === undefined ? 0 : Number(before.replace('page-', ''));
-      const threads = (pages[index] ?? []).map((thread) => ({
-        ...thread,
-        thread_metadata: { archive_timestamp: `page-${index + 1}` },
-      }));
-      return { threads, has_more: index + 1 < pages.length };
-    },
-    messagesAfter: async (channelId, after) => {
-      world.calls.push(`messages ${channelId} after ${after}`);
-      const all = world.messages[channelId] ?? [];
-      return all
-        .filter((item) => BigInt(item.id) > BigInt(after))
-        .slice(0, 100)
-        .reverse();
-    },
-    message: async (channelId, messageId) => {
-      world.calls.push(`message ${channelId}/${messageId}`);
-      const found = (world.messages[channelId] ?? []).find((item) => item.id === messageId);
-      if (!found) return null;
-      return {
-        ...found,
-        attachments: found.attachments.map((item) => (item.url === 'https://cdn.test/expired' ? { ...item, url: 'https://cdn.test/fresh' } : item)),
-      };
-    },
-    member: async (_guildId, userId) =>
-      (userId === ALICE.id ? { nick: 'Alice (Mod)' } : null) as Awaited<ReturnType<Discord['member']>>,
-    download: async (url) => {
-      const bytes = world.files[url];
-      if (!bytes) throw new Error('download failed with HTTP 404');
-      const body = new Response(bytes).body;
-      if (!body) throw new Error('no body');
-      const headers = world.headers[url] ?? {};
-      return {
-        body,
-        contentType: headers.contentType === undefined ? 'image/png' : headers.contentType,
-        contentLength: headers.contentLength === undefined ? bytes.byteLength : headers.contentLength,
-        encoded: headers.encoded ?? false,
-      };
-    },
-  };
-}
+import {
+  ALICE,
+  CATEGORY,
+  FORUM,
+  IMAGE,
+  MESSAGE_THREAD,
+  POST_ACTIVE,
+  POST_ARCHIVED,
+  POST_ARCHIVED_OLDER,
+  PRIVATE_THREAD,
+  TEXT,
+  channel,
+  fake,
+  server,
+  type FakeServer,
+} from './fakes/discord.ts';
 
 let runDir: string;
 beforeEach(async () => {

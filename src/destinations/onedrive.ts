@@ -35,6 +35,8 @@ export interface RunRecord {
   categoryName: string;
   status: 'in progress' | 'uploaded' | 'verified';
   updatedAt: string;
+  // Present once verification has run: each check's name and whether it passed.
+  checks?: Array<{ name: string; passed: boolean }>;
 }
 
 export async function uploadToOneDrive(options: UploadOptions): Promise<UploadResult> {
@@ -125,7 +127,18 @@ function parseRunRecord(text: string): RunRecord | null {
   }
 }
 
-async function writeRunRecord(graph: Graph, folderId: string, state: RunState, status: RunRecord['status']): Promise<void> {
+export async function readRunRecord(graph: Graph, folderId: string): Promise<RunRecord | null> {
+  const item = await graph.child(folderId, RUN_RECORD);
+  return item ? parseRunRecord(await graph.readText(item.id)) : null;
+}
+
+export async function writeRunRecord(
+  graph: Graph,
+  folderId: string,
+  state: RunState,
+  status: RunRecord['status'],
+  checks?: RunRecord['checks'],
+): Promise<void> {
   const record: RunRecord = {
     tool: 'discord-archive-tool-cli',
     schema: 1,
@@ -134,6 +147,7 @@ async function writeRunRecord(graph: Graph, folderId: string, state: RunState, s
     categoryName: state.categoryName,
     status,
     updatedAt: new Date().toISOString(),
+    ...(checks ? { checks } : {}),
   };
   await graph.uploadText(folderId, RUN_RECORD, `${JSON.stringify(record, null, 2)}\n`);
 }

@@ -4,7 +4,7 @@ A command-line tool that archives a Discord category — every channel, thread a
 
 Built for server staff who need to keep records (moderation cases, tickets, appeals) without keeping hundreds of old channels open.
 
-> **Status: in development.** You can capture a category and upload it to OneDrive now. Verifying and deleting are being built next. Nothing in this repository can delete anything yet.
+> **Status: in development.** You can archive a category to OneDrive and verify it now. Deleting is being built next. Nothing in this repository can delete anything yet.
 
 ## How it keeps your data safe
 
@@ -42,7 +42,7 @@ Each chat page shows who said what and when (in UTC), replies, forwards, edits, 
 
 | Destination | Status |
 |---|---|
-| Microsoft OneDrive | Uploads work; verification in development |
+| Microsoft OneDrive | Archive and verify work; delete in development |
 | Local folder on your computer | Planned |
 | Google Drive | Planned |
 
@@ -75,17 +75,25 @@ This saves every channel, thread and forum post in the category to `ARCHIVER_DAT
 
 If it stops part-way, run the same command again. Channels already saved are skipped.
 
-To upload to OneDrive as well:
+To archive to OneDrive:
 
 ```sh
 npm start -- archive <categoryId> --to onedrive
 ```
 
-It captures first, then shows a code to sign in with at microsoft.com/devicelogin. Sign in with the account that owns `ONEDRIVE_ROOT`. It then uploads to `ONEDRIVE_ROOT/<category name>/`, and prints the folder's address.
+It captures first, then shows a code to sign in with at microsoft.com/devicelogin. Sign in with the account that owns `ONEDRIVE_ROOT`. It uploads to `ONEDRIVE_ROOT/<category name>/`, then verifies:
+
+1. **Complete capture**: no channel, thread, post or message appeared in Discord since capture, and Discord's message count for each thread matches.
+2. **Files downloaded**: every local file matches the manifest, and every attachment is the size Discord reported.
+3. **Upload intact**: every file is downloaded back from OneDrive and matches its SHA-256 checksum, and OneDrive holds nothing extra.
+4. **Folders reachable**: the archive folder and every channel folder have an address in OneDrive.
+
+If all four pass, `_run.json` in OneDrive is set to `verified`, an entry goes in `ARCHIVER_DATA_DIR/audit.jsonl`, and a summary is posted to `DISCORD_LOG_CHANNEL_ID`. If any fail, it lists every problem and the archive stays unverified.
 
 - `ONEDRIVE_ROOT` must already exist. The tool won't create it, so a typo can't scatter archives.
 - The tool only writes into a folder it created itself for this same category (it leaves a `_run.json` there to tell). It refuses a folder with the same name made by anyone else, or for a different category, and it never changes an archive that is already verified.
 - If it stops part-way, run the same command again. Files already uploaded are skipped.
+- OneDrive's browser preview can't follow links between pages or show images. Download the folder, or use the OneDrive sync app, to browse an archive.
 
 Each file attached to a message must download at exactly the size Discord reports, or the capture stops. Images shown in link previews and stickers are saved when possible; any that can't be saved are listed in `_index.html`.
 
