@@ -313,6 +313,7 @@ describe('renderCategoryIndex', () => {
     );
     assert.match(html, /<th>Threads \/ posts<\/th>/);
     assert.match(html, /Open a channel below/);
+    assert.match(html, /download the folder first/);
     assert.ok(!html.includes('_run.json'), 'no pointer to a file the archive does not hold');
   });
 });

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import type { TokenSource } from './microsoft.ts';
 
@@ -7,6 +8,8 @@ import type { TokenSource } from './microsoft.ts';
 const API = 'https://graph.microsoft.com/v1.0/me/drive';
 const TIMEOUT_MS = 60_000;
 const CHUNK_TIMEOUT_MS = 5 * 60_000;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+const ITEM_FIELDS = 'id,name,size,webUrl,folder,file';
 const MAX_ATTEMPTS = 5;
 // Upload chunks must be a multiple of 320 KiB. 10 MiB = 32 × 320 KiB.
 export const CHUNK_SIZE = 10 * 1024 * 1024;
@@ -18,7 +21,7 @@ export interface DriveItem {
   webUrl: string;
   size?: number;
   folder?: unknown;
-  file?: unknown;
+  file?: { hashes?: { quickXorHash?: string } };
 }
 
 export class GraphError extends Error {
@@ -106,6 +109,36 @@ export function createGraph(options: GraphOptions) {
 
     // `path` is relative to the root of the OneDrive, e.g. "Team/Archives".
     itemByPath: (path: string) => orNull(json<DriveItem>(`${API}/root:/${encodePath(path)}`)),
+
+    item: (itemId: string) => json<DriveItem>(`${API}/items/${encodeURIComponent(itemId)}?$select=${ITEM_FIELDS}`),
+
+    // Every item directly inside a folder, following Graph's pages to the end.
+    children: async (folderId: string): Promise<DriveItem[]> => {
+      const items: DriveItem[] = [];
+      let url: string | undefined = `${API}/items/${encodeURIComponent(folderId)}/children?$select=${ITEM_FIELDS}&$top=200`;
+      while (url) {
+        const page: { value: DriveItem[]; '@odata.nextLink'?: string } = await json(url);
+        items.push(...page.value);
+        url = page['@odata.nextLink'];
+      }
+      return items;
+    },
+
+    // Reads a file back and returns what actually arrived, for comparing with the local copy.
+    downloadSha256: async (itemId: string): Promise<{ size: number; sha256: string }> => {
+      const response = await send(`${API}/items/${encodeURIComponent(itemId)}/content`, {
+        auth: true,
+        timeoutMs: DOWNLOAD_TIMEOUT_MS,
+      });
+      if (!response.ok || !response.body) return fail(response);
+      const hash = createHash('sha256');
+      let size = 0;
+      for await (const chunk of response.body) {
+        hash.update(chunk);
+        size += chunk.byteLength;
+      }
+      return { size, sha256: hash.digest('hex') };
+    },
 
     child: (parentId: string, name: string) => orNull(json<DriveItem>(childUrl(parentId, name))),
 

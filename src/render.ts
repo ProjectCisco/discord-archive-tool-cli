@@ -365,7 +365,7 @@ export function renderCategoryIndex(input: {
   const header =
     `<h1>${escapeHtml(input.categoryName)}</h1>` +
     `<p class="meta">${escapeHtml(input.guildName)} · category ${input.categoryId} · archived ${utc(input.archivedAt)} by ${escapeHtml(input.operator)}</p>` +
-    '<p class="meta">Open a channel below. Each channel folder holds the chat page, an attachments folder and a .json file with the full data. _manifest-sha256.txt lists a checksum for every file.</p>';
+    '<p class="meta">Open a channel below. Each channel folder holds the chat page, an attachments folder and a .json file with the full data. _manifest-sha256.txt lists a checksum for every file. If links or images don\'t open in a browser preview (OneDrive, SharePoint), download the folder first.</p>';
   return page(
     input.categoryName,
     header,

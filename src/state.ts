@@ -1,6 +1,7 @@
 import { open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { IndexEntry } from './render.ts';
+import type { Check, RemoteFile } from './verify.ts';
 
 export interface CapturedChannel {
   folder: string;
@@ -26,6 +27,13 @@ export interface RunState {
     webUrl: string;
     // Path in the archive → SHA-256 of the copy that was uploaded. A changed file is sent again.
     files: Record<string, string>;
+  };
+  // The last verification. Only 'verified' lets delete run.
+  verification?: {
+    status: 'verified' | 'failed';
+    at: string;
+    checks: Check[];
+    remote: Record<string, RemoteFile>;
   };
 }
 
