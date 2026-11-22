@@ -17,6 +17,15 @@ Only the latest commit on `main` is supported.
 - Google Drive access is limited to the `drive.file` permission: only files the tool creates.
 - Errors name a setting that is missing or invalid, never its value.
 
+## How the tool handles untrusted content
+
+Everything in a Discord server is written by its members, so the tool treats it as untrusted:
+
+- **Files** are downloaded only over https from Discord's own file servers. A link preview can point anywhere, including addresses inside your network, so other addresses are never requested. Downloads have a size ceiling.
+- **File and folder names** are rewritten so they can't climb out of the archive folder or break OneDrive's rules.
+- **Archive pages** escape everything members wrote, and their security policy blocks scripts, forms and anything loaded from outside the archive.
+- **Log posts** can't ping anyone.
+
 ## Keeping your setup safe
 
 - Give the bot only the permissions it needs, in the servers where you use it.

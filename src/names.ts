@@ -22,10 +22,14 @@ function clean(raw: string, maxLength: number): string {
   return name;
 }
 
+// Only a short run of letters, digits, _ or - counts as an extension. Anything else (a trailing dot,
+// spaces, symbols) stays in the name, where clean() makes it safe.
+const EXTENSION = /\.[\p{L}\p{N}_-]{1,15}$/u;
+
 function splitExtension(name: string): { stem: string; extension: string } {
-  const dot = name.lastIndexOf('.');
-  if (dot <= 0 || name.length - dot > 16) return { stem: name, extension: '' };
-  return { stem: name.slice(0, dot), extension: name.slice(dot) };
+  const match = EXTENSION.exec(name);
+  if (!match || match.index === 0) return { stem: name, extension: '' };
+  return { stem: name.slice(0, match.index), extension: match[0] };
 }
 
 export function safeName(raw: string): string {
@@ -45,8 +49,7 @@ export function claimFolderName(raw: string, id: string, taken: Set<string>): st
 }
 
 export function claimFileName(raw: string, taken: Set<string>): string {
-  const { stem: rawStem, extension: rawExtension } = splitExtension(raw.normalize('NFC'));
-  const extension = rawExtension.replace(INVALID, '_');
+  const { stem: rawStem, extension } = splitExtension(raw.normalize('NFC'));
   const stem = clean(rawStem, MAX_LENGTH - extension.length);
 
   let name = `${stem}${extension}`;

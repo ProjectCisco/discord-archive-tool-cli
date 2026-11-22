@@ -1,16 +1,19 @@
 import { createHash } from 'node:crypto';
+import { explain } from './errors.ts';
 
 // HTTP with the retry rules both cloud destinations need: throttling, server errors and dropped
 // connections are retried, waiting as long as the server asks, up to five tries.
 
 const MAX_ATTEMPTS = 5;
+// A server asking for a longer wait than this gets it capped; the attempt limit still applies.
+const MAX_WAIT_MS = 2 * 60_000;
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 export interface HttpOptions {
   service: string;
   token: () => Promise<string>;
-  fetch?: typeof fetch;
-  sleep?: (ms: number) => Promise<void>;
+  fetch?: typeof fetch | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
   // For services that signal throttling some other way, such as Google's 403 rate-limit errors.
   throttled?: (response: Response) => Promise<boolean>;
 }
@@ -36,14 +39,15 @@ export function createSend(options: HttpOptions): Send {
       try {
         response = await http(url, { ...rest, headers, signal: AbortSignal.timeout(timeoutMs) });
       } catch (error) {
-        if (attempt >= MAX_ATTEMPTS) throw new Error(`Couldn't reach ${options.service}: ${(error as Error).message}`);
+        if (attempt >= MAX_ATTEMPTS) throw new Error(`Couldn't reach ${options.service}: ${explain(error)}`);
       }
       if (response) {
         const retry = RETRY_STATUSES.has(response.status) || (await options.throttled?.(response.clone())) === true;
         if (!retry || attempt >= MAX_ATTEMPTS) return response;
       }
       const retryAfter = Number(response?.headers.get('retry-after'));
-      await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2 ** attempt * 1000);
+      const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2 ** attempt * 1000;
+      await sleep(Math.min(wait, MAX_WAIT_MS));
     }
   };
 }

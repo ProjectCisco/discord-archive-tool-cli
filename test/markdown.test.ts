@@ -40,3 +40,13 @@ describe('renderMarkdown', () => {
     assert.equal(render('\u00000\u0000 `x`'), '0 <code>x</code>');
   });
 });
+
+describe('renderMarkdown speed', () => {
+  test('stays fast on the worst input Discord allows (4,000 characters of unclosed markers)', () => {
+    for (const marker of ['**', '__', '*', '_', '~~', '||', '`', '> ', '# ']) {
+      const started = performance.now();
+      renderMarkdown(`${marker}a `.repeat(Math.floor(4000 / (marker.length + 2))), (escaped) => escaped);
+      assert.ok(performance.now() - started < 500, `${marker} took too long`);
+    }
+  });
+});

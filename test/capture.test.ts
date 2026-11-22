@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,6 @@ import type { Transcript } from '../src/transcript.ts';
 import {
   ALICE,
   CATEGORY,
-  FORUM,
   IMAGE,
   MESSAGE_THREAD,
   POST_ACTIVE,
@@ -35,7 +35,7 @@ afterEach(async () => {
 });
 
 async function readTranscript(folder: string): Promise<Transcript> {
-  return JSON.parse(await readFile(join(runDir, 'tree', folder, `${folder}.json`), 'utf8')) as Transcript;
+  return JSON.parse(await readFile(join(runDir, 'tree', '_data', `${folder}.json`), 'utf8')) as Transcript;
 }
 
 async function readPage(folder: string): Promise<string> {
@@ -133,10 +133,13 @@ describe('captureCategory', () => {
     await assertStops(world, /got 8 bytes/);
   });
 
-  test('keeps each channel in one folder: the chat page, its data and one attachments folder', async () => {
+  test('gives staff one folder per channel with just the chat page and its files, and keeps the rest in _data', async () => {
     await captureCategory({ discord: fake(server()), categoryId: CATEGORY, runDir, operator: 'tester', log: () => {} });
-    assert.deepEqual((await readdir(join(runDir, 'tree', 'case-one'))).sort(), ['attachments', 'case-one.html', 'case-one.json']);
-    assert.deepEqual((await readdir(join(runDir, 'tree', 'appeals'))).sort(), ['appeals.html', 'appeals.json']);
+    const tree = join(runDir, 'tree');
+    assert.deepEqual((await readdir(tree)).sort(), ['_data', '_index.html', 'appeals', 'case-one', 'hearing']);
+    assert.deepEqual((await readdir(join(tree, 'case-one'))).sort(), ['attachments', 'case-one.html']);
+    assert.deepEqual((await readdir(join(tree, 'appeals'))).sort(), ['appeals.html']);
+    assert.deepEqual((await readdir(join(tree, '_data'))).sort(), ['_manifest-sha256.txt', 'appeals.json', 'case-one.json', 'hearing.json']);
     // The thread's file lands beside the channel's own, numbered so nothing is overwritten.
     const transcript = await readTranscript('case-one');
     assert.equal(transcript.files['400000000000000003']?.path, 'attachments/image (3).png');
@@ -209,14 +212,30 @@ describe('captureCategory', () => {
   test('writes an index and a manifest that covers every file', async () => {
     await captureCategory({ discord: fake(server()), categoryId: CATEGORY, runDir, operator: 'tester', log: () => {} });
     const tree = join(runDir, 'tree');
-    const manifest = parseManifest(await readFile(join(tree, '_manifest-sha256.txt'), 'utf8'));
+    const manifest = parseManifest(await readFile(join(tree, '_data', '_manifest-sha256.txt'), 'utf8'));
     const files = (await readdir(tree, { recursive: true, withFileTypes: true }))
       .filter((item) => item.isFile() && item.name !== '_manifest-sha256.txt')
       .map((item) => join(item.parentPath, item.name).slice(tree.length + 1).split('\\').join('/'));
     assert.deepEqual([...manifest.keys()].sort(), files.sort());
     assert.ok(manifest.has('_index.html'));
     assert.ok(manifest.has('case-one/case-one.html'));
+    assert.ok(manifest.has('_data/case-one.json'));
     assert.ok(manifest.has('case-one/attachments/image (3).png'));
+    // The same check anyone can run by hand, from the archive folder.
+    if (spawnSync('sha256sum', ['--version']).error === undefined) {
+      execFileSync('sha256sum', ['-c', '--quiet', '_data/_manifest-sha256.txt'], { cwd: tree });
+    }
+  });
+
+  test('never lets a channel called _data take the tool’s own folder', async () => {
+    const world = server();
+    const text = world.channels.find((channel) => channel.id === TEXT);
+    assert.ok(text);
+    text.name = '_data';
+    await captureCategory({ discord: fake(world), categoryId: CATEGORY, runDir, operator: 'tester', log: () => {} });
+    const folders = await readdir(join(runDir, 'tree'));
+    assert.ok(folders.includes('_data (000003)'), folders.join(', '));
+    assert.deepEqual((await readdir(join(runDir, 'tree', '_data (000003)'))).sort(), ['_data (000003).html', 'attachments']);
   });
 
   test('refuses a category holding a channel type it cannot archive, before writing anything', async () => {

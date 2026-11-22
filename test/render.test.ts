@@ -63,10 +63,11 @@ describe('escapeHtml', () => {
 });
 
 describe('renderTranscript', () => {
-  test('starts with a UTF-8 charset and blocks scripts', () => {
+  test('starts with a UTF-8 charset and blocks scripts and remote content', () => {
     const html = renderTranscript(transcript([]));
     assert.match(html, /^<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">/);
-    assert.match(html, /script-src 'none'/);
+    // Nothing may load from outside the archive: no scripts, no remote images, no forms.
+    assert.match(html, /default-src 'none'; img-src 'self' file: data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'/);
   });
 
   test('escapes hostile content, names, embeds and file names', () => {
@@ -312,8 +313,8 @@ describe('renderCategoryIndex', () => {
       /<a href="example%20appeal\/example%20appeal\.html">#example appeal<\/a><\/td><td>212<\/td><td>9<\/td><td>1<\/td>/,
     );
     assert.match(html, /<th>Threads \/ posts<\/th>/);
-    assert.match(html, /Open a channel below/);
-    assert.match(html, /download the folder first/);
+    assert.match(html, /Click a channel to read it/);
+    assert.match(html, /The _data folder is for the archive tool; you can ignore it/);
     assert.ok(!html.includes('_run.json'), 'no pointer to a file the archive does not hold');
   });
 });

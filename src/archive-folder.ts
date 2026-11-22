@@ -2,7 +2,8 @@ import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Destination } from './config.ts';
 import type { RemoteItem, Store } from './destinations/store.ts';
-import { MANIFEST_NAME, parseManifest, sha256File } from './manifest.ts';
+import { DATA_DIR, INDEX_NAME, MANIFEST_PATH, RUN_RECORD_NAME } from './layout.ts';
+import { parseManifest, sha256File } from './manifest.ts';
 import { safeName } from './names.ts';
 import type { RunState } from './state.ts';
 
@@ -10,7 +11,6 @@ import type { RunState } from './state.ts';
 // what order, and resuming. The same for every destination.
 
 const MAX_FILE_ATTEMPTS = 3;
-export const RUN_RECORD = '_run.json';
 
 // Identifies a folder as one this tool made, for one category.
 export interface RunRecord {
@@ -56,10 +56,10 @@ export async function uploadArchive(options: UploadOptions) {
   }
   const done = state.upload.files;
 
-  const checksums = parseManifest(await readFile(join(treeDir, MANIFEST_NAME), 'utf8'));
-  checksums.set(MANIFEST_NAME, await sha256File(join(treeDir, MANIFEST_NAME)));
+  const checksums = parseManifest(await readFile(join(treeDir, MANIFEST_PATH), 'utf8'));
+  checksums.set(MANIFEST_PATH, await sha256File(join(treeDir, MANIFEST_PATH)));
   // The index and manifest go last, so an archive that has them is one whose files all arrived.
-  const last = ['_index.html', MANIFEST_NAME];
+  const last = [INDEX_NAME, MANIFEST_PATH];
   const order = [...[...checksums.keys()].filter((path) => !last.includes(path)).sort(), ...last.filter((path) => checksums.has(path))];
 
   const folders = new Map<string, string>([['', folder.id]]);
@@ -112,7 +112,8 @@ async function existingFolder(store: Store, root: RemoteItem, name: string, owne
 
 // Undefined when there is no run record; null when there is one but it isn't ours or can't be read.
 export async function readRunRecord(store: Store, folderId: string): Promise<RunRecord | null | undefined> {
-  const item = await store.child(folderId, RUN_RECORD);
+  const data = await store.child(folderId, DATA_DIR);
+  const item = data && (await store.child(data.id, RUN_RECORD_NAME));
   if (!item) return undefined;
   try {
     const record = JSON.parse(await store.readText(item.id)) as Partial<RunRecord>;
@@ -139,7 +140,8 @@ export async function writeRunRecord(
     updatedAt: new Date().toISOString(),
     ...(checks ? { checks } : {}),
   };
-  await store.writeText(folderId, RUN_RECORD, `${JSON.stringify(record, null, 2)}\n`);
+  const data = (await store.child(folderId, DATA_DIR)) ?? (await store.createFolder(folderId, DATA_DIR));
+  await store.writeText(data.id, RUN_RECORD_NAME, `${JSON.stringify(record, null, 2)}\n`);
 }
 
 // Everything under an archive folder, by path relative to it.

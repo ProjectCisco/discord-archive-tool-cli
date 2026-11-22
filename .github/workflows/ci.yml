@@ -9,8 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  test:
+    # The tool is run on Windows as well as Linux, and paths behave differently on each.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.os }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -23,3 +29,12 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm audit --audit-level=low
+
+  # The branch rule requires a check named "check". This one passes only if every platform passed;
+  # without `always()`, a failed test would skip it, and GitHub counts a skipped check as passing.
+  check:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test.result }}" = success

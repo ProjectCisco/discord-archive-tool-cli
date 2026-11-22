@@ -12,7 +12,7 @@ export interface CapturedChannel {
   misses: string[];
 }
 
-export const STATE_SCHEMA = 2;
+export const STATE_SCHEMA = 3;
 
 export interface RunState {
   schema: typeof STATE_SCHEMA;
@@ -81,6 +81,24 @@ export async function writeState(runDir: string, state: RunState): Promise<void>
   await writeFileAtomic(join(runDir, 'state.json'), JSON.stringify(state, null, 2));
 }
 
+function lockOwner(text: string): number {
+  try {
+    return Number((JSON.parse(text) as { pid?: unknown }).pid);
+  } catch {
+    return Number.NaN;
+  }
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means it exists but belongs to someone else: still running.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 export async function acquireLock(runDir: string): Promise<() => Promise<void>> {
   const path = join(runDir, 'lock');
   try {
@@ -89,10 +107,15 @@ export async function acquireLock(runDir: string): Promise<() => Promise<void>> 
     await file.close();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const holder = await readFile(path, 'utf8').catch(() => 'unknown');
-    throw new Error(
-      `Another run is using ${runDir} (${holder}). If no run is active, delete ${path} and try again.`,
-    );
+    const holder = await readFile(path, 'utf8').catch(() => '');
+    // A run stopped by Ctrl+C or a crash leaves its lock behind. If that process is gone, the lock
+    // is stale and is taken over; if it is still running, the second run must not start.
+    const pid = lockOwner(holder);
+    if (Number.isInteger(pid) && pid > 0 && !isRunning(pid)) {
+      await rm(path, { force: true });
+      return acquireLock(runDir);
+    }
+    throw new Error(`Another run is using ${runDir} (${holder || 'unknown'}). If no run is active, delete ${path} and try again.`);
   }
   return () => rm(path, { force: true });
 }

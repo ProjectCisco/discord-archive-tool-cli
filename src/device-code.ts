@@ -122,11 +122,13 @@ export async function signIn(options: SignInOptions): Promise<TokenSource> {
   for (;;) {
     if (now() >= giveUpAt) throw new Error(EXPIRED);
     await sleep(interval);
+    // While waiting for the person, a dropped connection is just one missed poll.
     const poll = await post(provider.tokenUrl, {
       ...client,
       grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
       device_code: code.device_code,
-    });
+    }).catch(() => null);
+    if (!poll) continue;
     if (poll.ok) {
       keep(poll.body as TokenResponse, null);
       break;

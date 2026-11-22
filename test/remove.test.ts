@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { ChannelType } from 'discord-api-types/v10';
 import { captureCategory } from '../src/capture.ts';
-import { RUN_RECORD, uploadArchive, writeRunRecord } from '../src/archive-folder.ts';
+import { uploadArchive, writeRunRecord } from '../src/archive-folder.ts';
+import { RUN_RECORD_PATH } from '../src/layout.ts';
 import { deleteChannels, plan, recheck, refusal } from '../src/remove.ts';
 import { readState, type RunState } from '../src/state.ts';
 import { verifyArchive } from '../src/verify.ts';
@@ -59,7 +60,7 @@ async function verified() {
 
 describe('refusal', () => {
   const base: RunState = {
-    schema: 2,
+    schema: 3,
     guildId: '1',
     categoryId: '2',
     categoryName: 'x',
@@ -115,7 +116,7 @@ describe('recheck', () => {
   test('refuses when the run record no longer says verified', async () => {
     const { drive, state, folderId, check } = await verified();
     await writeRunRecord(drive.store, folderId, state, 'uploaded');
-    assert.deepEqual((await check()), [`${RUN_RECORD} in Test Drive no longer says verified`]);
+    assert.deepEqual((await check()), [`${RUN_RECORD_PATH} in Test Drive no longer says verified`]);
   });
 });
 

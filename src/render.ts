@@ -158,7 +158,7 @@ function replyQuote(message: APIMessage, transcript: Transcript): string {
   if (parent === undefined) return '<div class="reply missing">Replying to a message that could not be loaded</div>';
   const author = escapeHtml(person(parent.author, transcript).displayName);
   const text = parent.content ? formatContent(preview(parent.content, 200), transcript) : '[No text content]';
-  return `<a class="reply" href="#msg-${parent.id}">↪ ${author}: ${text}</a>`;
+  return `<a class="reply" href="#msg-${escapeHtml(parent.id)}">↪ ${author}: ${text}</a>`;
 }
 
 function forwardBlock(message: APIMessage, transcript: Transcript): string {
@@ -216,13 +216,13 @@ function extras(message: APIMessage, transcript: Transcript): string {
 
 function renderMessage(message: APIMessage, transcript: Transcript): string {
   const author = person(message.author, transcript);
-  const name = `<span class="author" title="${escapeHtml(author.username)} · ${author.id}">${escapeHtml(author.displayName)}</span>`;
+  const name = `<span class="author" title="${escapeHtml(author.username)} · ${escapeHtml(author.id)}">${escapeHtml(author.displayName)}</span>`;
   const time = `<time datetime="${escapeHtml(message.timestamp)}">${utc(message.timestamp)}</time>`;
 
   if (!CONVERSATION.has(message.type)) {
     const label = SYSTEM_LABELS.get(message.type) ?? `system message (type ${message.type})`;
     const detail = message.content ? `: ${escapeHtml(message.content)}` : '';
-    return `<article class="msg system" id="msg-${message.id}">${name} ${label}${detail}${time}</article>`;
+    return `<article class="msg system" id="msg-${escapeHtml(message.id)}">${name} ${label}${detail}${time}</article>`;
   }
 
   const edited = message.edited_timestamp ? `<span class="edited">(edited ${utc(message.edited_timestamp)})</span>` : '';
@@ -231,7 +231,7 @@ function renderMessage(message: APIMessage, transcript: Transcript): string {
   const main = forward !== '' && message.content === '' ? '' : body(message.content, transcript);
 
   return (
-    `<article class="msg" id="msg-${message.id}">` +
+    `<article class="msg" id="msg-${escapeHtml(message.id)}">` +
     `<header>${name}${time}${edited}${pinned}</header>` +
     replyQuote(message, transcript) +
     forward +
@@ -248,7 +248,7 @@ function page(title: string, header: string, content: string): string {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file: data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <style>${STYLE}</style>
@@ -300,7 +300,7 @@ function channelBody(transcript: Transcript): string {
 
 function threadSection(thread: Thread, transcript: Transcript): string {
   return (
-    `<section class="thread" id="thread-${thread.channel.id}">` +
+    `<section class="thread" id="thread-${escapeHtml(thread.channel.id)}">` +
     `<h2>🧵 ${escapeHtml(thread.channel.name)}</h2>` +
     `<p class="meta">${messageCount(thread.messages.length)}</p>` +
     thread.messages.map((message) => renderMessage(message, transcript)).join('\n') +
@@ -317,11 +317,11 @@ function forumBody(transcript: Transcript): string {
   };
 
   const list = transcript.threads
-    .map((post) => `<li><a href="#post-${post.channel.id}">${escapeHtml(post.channel.name)}</a> <span class="meta">${started(post)}</span></li>`)
+    .map((post) => `<li><a href="#post-${escapeHtml(post.channel.id)}">${escapeHtml(post.channel.name)}</a> <span class="meta">${started(post)}</span></li>`)
     .join('');
   const posts = transcript.threads.map(
     (post) =>
-      `<section class="post" id="post-${post.channel.id}">` +
+      `<section class="post" id="post-${escapeHtml(post.channel.id)}">` +
       `<h2>${escapeHtml(post.channel.name)}</h2><p class="meta">${started(post)}</p>` +
       post.messages.map((message) => renderMessage(message, transcript)).join('\n') +
       '</section>',
@@ -365,7 +365,7 @@ export function renderCategoryIndex(input: {
   const header =
     `<h1>${escapeHtml(input.categoryName)}</h1>` +
     `<p class="meta">${escapeHtml(input.guildName)} · category ${input.categoryId} · archived ${utc(input.archivedAt)} by ${escapeHtml(input.operator)}</p>` +
-    '<p class="meta">Open a channel below. Each channel folder holds the chat page, an attachments folder and a .json file with the full data. _manifest-sha256.txt lists a checksum for every file. If links or images don\'t open in a browser preview (OneDrive, SharePoint), download the folder first.</p>';
+    '<p class="meta">Click a channel to read it. Each channel\'s folder holds its chat page and its files. The _data folder is for the archive tool; you can ignore it. If links or pictures don\'t open in an online preview, download the folder first.</p>';
   return page(
     input.categoryName,
     header,
