@@ -53,6 +53,8 @@ export interface FakeServer {
   // Response headers per URL. By default a file is served as image/png with its exact Content-Length.
   headers: Record<string, { contentType?: string | null; contentLength?: number | null; encoded?: boolean }>;
   calls: string[];
+  // Channel IDs the bot isn't allowed to delete.
+  protected?: string[];
 }
 
 export function server(): FakeServer {
@@ -175,6 +177,17 @@ export function fake(world: FakeServer): Discord {
     },
     member: async (_guildId, userId) =>
       (userId === ALICE.id ? { nick: 'Alice (Mod)' } : null) as Awaited<ReturnType<Discord['member']>>,
+    deleteChannel: async (channelId, reason) => {
+      world.calls.push(`delete ${channelId}: ${reason}`);
+      if (world.protected?.includes(channelId)) throw new Error('Missing Permissions');
+      const index = world.channels.findIndex((item) => item.id === channelId);
+      if (index === -1) return 'gone';
+      world.channels.splice(index, 1);
+      world.activeThreads = world.activeThreads.filter((thread) => thread.parent_id !== channelId);
+      delete world.archived[channelId];
+      delete world.messages[channelId];
+      return 'deleted';
+    },
     post: async (channelId, content) => {
       world.calls.push(`post ${channelId}: ${content}`);
     },

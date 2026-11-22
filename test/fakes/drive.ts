@@ -32,7 +32,7 @@ export function fakeDrive() {
     webUrl: `https://onedrive.test/${encodeURI(pathOf(node))}`,
     ...(node.folder
       ? { folder: {} }
-      : { file: { hashes: { quickXorHash: `qx-${node.content?.byteLength ?? 0}` } }, size: node.content?.byteLength ?? 0 }),
+      : { file: { hashes: { quickXorHash: `qx-${createHash('sha1').update(node.content ?? new Uint8Array()).digest('hex').slice(0, 8)}` } }, size: node.content?.byteLength ?? 0 }),
   });
   const store = (parentId: string, name: string, content: Uint8Array) => {
     const existing = find(parentId, name);

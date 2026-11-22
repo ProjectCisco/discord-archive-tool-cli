@@ -39,19 +39,41 @@ export interface RunRecord {
   checks?: Array<{ name: string; passed: boolean }>;
 }
 
-export async function uploadToOneDrive(options: UploadOptions): Promise<UploadResult> {
-  const { graph, state, treeDir, log } = options;
+export interface Owner {
+  guildId: string;
+  categoryId: string;
+}
 
-  const owner = await graph.owner();
-  log(`Using the OneDrive of ${owner}.`);
-  const root = await graph.itemByPath(options.root);
+// Checks the destination before anything is captured, so a wrong account, a missing root or a
+// folder that can't be used stops the run in seconds. Writes nothing.
+export async function preflightOneDrive(
+  graph: Graph,
+  rootPath: string,
+  categoryName: string,
+  owner: Owner,
+  log: (line: string) => void,
+): Promise<void> {
+  const root = await findRoot(graph, rootPath, log);
+  await existingArchiveFolder(graph, root, safeName(categoryName), owner);
+}
+
+async function findRoot(graph: Graph, rootPath: string, log: (line: string) => void): Promise<DriveItem> {
+  const account = await graph.owner();
+  log(`Using the OneDrive of ${account}.`);
+  const root = await graph.itemByPath(rootPath);
   if (!root?.folder) {
     throw new Error(
-      `OneDrive folder "${options.root}" was not found in the OneDrive of ${owner}. ` +
+      `OneDrive folder "${rootPath}" was not found in the OneDrive of ${account}. ` +
         'Check you signed in with the account that owns it (a folder only shared with you will not work), or fix ONEDRIVE_ROOT.',
     );
   }
+  return root;
+}
 
+export async function uploadToOneDrive(options: UploadOptions): Promise<UploadResult> {
+  const { graph, state, treeDir, log } = options;
+  // preflightOneDrive has already said whose OneDrive this is.
+  const root = await findRoot(graph, options.root, () => {});
   const folderName = safeName(state.categoryName);
   const folder = await openArchiveFolder(graph, root, folderName, state);
   if (state.upload?.folderId !== folder.id) {
@@ -94,13 +116,18 @@ export async function uploadToOneDrive(options: UploadOptions): Promise<UploadRe
 
 // D4: create the folder, or resume one this tool made for this category. Anything else stops.
 async function openArchiveFolder(graph: Graph, root: DriveItem, name: string, state: RunState): Promise<DriveItem> {
+  const existing = await existingArchiveFolder(graph, root, name, state);
+  if (existing) return existing;
+  const created = await graph.createFolder(root.id, name);
+  // First file in, so a crash can never leave a folder of ours without its run record.
+  await writeRunRecord(graph, created.id, state, 'in progress');
+  return created;
+}
+
+// Null when there's no folder by that name yet. Throws for any folder this run must not use.
+async function existingArchiveFolder(graph: Graph, root: DriveItem, name: string, owner: Owner): Promise<DriveItem | null> {
   const existing = await graph.child(root.id, name);
-  if (!existing) {
-    const created = await graph.createFolder(root.id, name);
-    // First file in, so a crash can never leave a folder of ours without its run record.
-    await writeRunRecord(graph, created.id, state, 'in progress');
-    return created;
-  }
+  if (!existing) return null;
 
   const where = `OneDrive already has a folder named "${name}"`;
   if (!existing.folder) throw new Error(`${where}, and it is a file. Rename or move it, then run again.`);
@@ -109,7 +136,7 @@ async function openArchiveFolder(graph: Graph, root: DriveItem, name: string, st
     throw new Error(`${where} that this tool didn't create. It won't write into it. Rename or move it, then run again.`);
   }
   const record = parseRunRecord(await graph.readText(recordItem.id));
-  if (!record || record.guildId !== state.guildId || record.categoryId !== state.categoryId) {
+  if (!record || record.guildId !== owner.guildId || record.categoryId !== owner.categoryId) {
     throw new Error(`${where} for a different category. Rename the category in Discord (for example, add the year), then run again.`);
   }
   if (record.status === 'verified') {

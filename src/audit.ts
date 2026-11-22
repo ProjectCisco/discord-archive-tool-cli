@@ -4,7 +4,13 @@ import { join } from 'node:path';
 // An append-only record of what the tool did, kept outside Discord (decision D11).
 // One JSON object per line. Never holds tokens or message content.
 
-export type AuditEvent = 'archive-verified' | 'archive-failed';
+export type AuditEvent =
+  | 'archive-verified'
+  | 'archive-failed'
+  | 'delete-refused'
+  | 'delete-confirmed'
+  | 'channel-deleted'
+  | 'delete-done';
 
 export interface AuditEntry {
   event: AuditEvent;
@@ -18,6 +24,8 @@ export interface AuditEntry {
   messages: number;
   files: number;
   failedChecks?: string[];
+  problems?: string[];
+  channel?: { id: string; name: string; outcome: 'deleted' | 'gone' };
 }
 
 export async function audit(dataDir: string, entry: AuditEntry, now = new Date()): Promise<void> {

@@ -4,31 +4,47 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { audit } from '../src/audit.ts';
-import { archiveReport, splitLines } from '../src/report.ts';
+import { runReport, splitLines } from '../src/report.ts';
 
-describe('archiveReport', () => {
-  test('summarises the archive and shows formatting characters in names as text', () => {
-    const [post] = archiveReport({
-      categoryName: 'Archive *November* 2026',
-      destination: 'OneDrive',
-      webUrl: 'https://onedrive.test/archive',
-      channels: ['case_one', 'appeals'],
-      messages: 212,
-      files: 9,
-    });
+describe('runReport', () => {
+  const summary = {
+    categoryName: 'Archive *November* 2026',
+    destination: 'OneDrive',
+    webUrl: 'https://onedrive.test/archive',
+    channels: [
+      { name: 'case_one', messages: 211 },
+      { name: 'appeals', messages: 1 },
+    ],
+    messages: 212,
+    files: 9,
+    operator: 'tester',
+    at: new Date('2026-11-22T14:56:00.000Z'),
+  };
+
+  test('summarises the run in one post, with a link and a time each reader sees in their own zone', () => {
+    const [post] = runReport({ ...summary, outcome: { status: 'deleted', deleted: ['case_one'], kept: ['appeals'] } });
     assert.equal(
       post,
       [
-        '✅ Archived **Archive \\*November\\* 2026** to OneDrive and verified (4/4 checks passed).',
-        '2 channels · 212 messages · 9 files',
-        '<https://onedrive.test/archive>',
-        'Nothing has been deleted yet.',
+        '## 🗄️ Archive \\*November\\* 2026',
+        '✅ Archived to OneDrive and verified · 4 of 4 checks passed',
+        '🗑️ Deleted 1 channel · the category was kept',
+        '📊 2 channels · 212 messages · 9 files',
+        '📁 [Open the archive in OneDrive](<https://onedrive.test/archive>)',
         '',
-        'Channels:',
-        '• #case\\_one',
-        '• #appeals',
+        '**Channels**',
+        '• #case\\_one · 211 messages',
+        '• #appeals · 1 message · kept (moved out of the category)',
+        '-# tester · <t:1795359360:f>',
       ].join('\n'),
     );
+  });
+
+  test('says plainly when nothing was deleted, and why', () => {
+    const line = (status: 'kept' | 'stopped' | 'refused') => runReport({ ...summary, outcome: { status } })[0]?.split('\n')[2];
+    assert.equal(line('kept'), '⏸️ Channels kept on purpose · nothing deleted');
+    assert.equal(line('stopped'), '⏸️ Stopped before deleting · nothing deleted');
+    assert.match(line('refused') ?? '', /^⚠️ Not deleted · Discord or OneDrive changed after verifying/);
   });
 });
 

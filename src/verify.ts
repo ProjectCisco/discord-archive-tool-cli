@@ -66,7 +66,7 @@ function check(name: string, problems: string[]): Check {
   return { name, passed: problems.length === 0, problems };
 }
 
-async function readTranscripts(treeDir: string, state: RunState): Promise<Array<{ folder: string; transcript: Transcript }>> {
+export async function readTranscripts(treeDir: string, state: RunState): Promise<Array<{ folder: string; transcript: Transcript }>> {
   const records = Object.values(state.channels);
   const result: Array<{ folder: string; transcript: Transcript }> = [];
   for (const { folder } of records) {
@@ -78,7 +78,7 @@ async function readTranscripts(treeDir: string, state: RunState): Promise<Array<
 
 // Check 1: no channel, thread, post or message appeared after capture, and Discord's own thread
 // counts agree with what was saved.
-async function checkCapture(
+export async function checkCapture(
   discord: Discord,
   state: RunState,
   transcripts: Array<{ transcript: Transcript }>,
@@ -220,7 +220,7 @@ async function checkUpload(
   return { check: check('Upload intact', problems), files: remote, folders };
 }
 
-async function walk(graph: Graph, folderId: string) {
+export async function walk(graph: Graph, folderId: string) {
   const files = new Map<string, DriveItem>();
   const folders = new Map<string, DriveItem>();
   const visit = async (id: string, prefix: string) => {

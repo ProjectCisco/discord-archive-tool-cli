@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +9,7 @@ import { captureCategory } from '../src/capture.ts';
 import { uploadToOneDrive } from '../src/destinations/onedrive.ts';
 import { readState } from '../src/state.ts';
 import { verifyArchive, type VerifyResult } from '../src/verify.ts';
-import { CATEGORY, TEXT, channel, fake, message, server } from './fakes/discord.ts';
+import { CATEGORY, IMAGE, TEXT, channel, fake, message, server } from './fakes/discord.ts';
 import { fakeDrive } from './fakes/drive.ts';
 
 // Created in 2026, so Discord's thread message count applies to it.
@@ -63,7 +64,10 @@ describe('verifyArchive', () => {
       result.checks.map((check) => check.name),
       ['Complete capture', 'Files downloaded', 'Upload intact', 'Folders reachable'],
     );
-    assert.deepEqual(result.remote['case-one/attachments/image.png'], { size: 8, quickXorHash: 'qx-8' });
+    assert.deepEqual(result.remote['case-one/attachments/image.png'], {
+      size: 8,
+      quickXorHash: `qx-${createHash('sha1').update(IMAGE).digest('hex').slice(0, 8)}`,
+    });
   });
 
   test('fails when a message, thread or channel appears after capture', async () => {
