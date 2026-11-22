@@ -4,18 +4,20 @@ A command-line tool that archives a Discord category — every channel, thread a
 
 Built for server staff who need to keep records (moderation cases, tickets, appeals) without keeping hundreds of old channels open.
 
-> **Status: in development.** You can archive a category to OneDrive and verify it now. Deleting is being built next. Nothing in this repository can delete anything yet.
+> **Status: in testing.** Archive, verify and delete work with OneDrive. Try delete on a throwaway category first.
 
 ## How it keeps your data safe
 
-Deleting a Discord channel can't be undone. So the tool works in two separate commands, and the second one refuses to run unless the first one proved the archive is complete.
+Deleting a Discord channel can't be undone. So nothing is deleted until the archive is proven complete.
 
-1. **`archive`** reads every message and file in the category, saves them, uploads them, then checks:
+One command, `archive`, does it all for one category:
+
+1. **It archives**: it reads every message and file in the category, saves them, uploads them, then checks:
    - every message was captured, with nothing missing at the end of any channel or thread
    - every file downloaded at the size Discord reported
    - every uploaded file reads back with the same size and SHA-256 checksum
    - every folder can be opened at its destination
-2. **`delete`** checks again that nothing has changed since the archive (no new messages, channels or threads, and no changed files), lists exactly what will be deleted, and asks you to type the category name before deleting anything.
+2. **Then it deletes the channels**: it lists exactly what will go, counts down 10 seconds (Ctrl+C stops it), checks again that nothing changed since the archive (no new messages, channels or threads, and no changed files), and deletes them one at a time. The category itself is kept. `--keep` skips this step.
 
 If any check fails, nothing is deleted and the tool tells you why. A crash at any point is safe: re-running picks up where it stopped.
 
@@ -42,7 +44,7 @@ Each chat page shows who said what and when (in UTC), replies, forwards, edits, 
 
 | Destination | Status |
 |---|---|
-| Microsoft OneDrive | Archive and verify work; delete in development |
+| Microsoft OneDrive | Archive, verify and delete work |
 | Local folder on your computer | Planned |
 | Google Drive | Planned |
 
@@ -81,14 +83,14 @@ To archive to OneDrive:
 npm start -- archive <categoryId> --to onedrive
 ```
 
-It captures first, then shows a code to sign in with at microsoft.com/devicelogin. Sign in with the account that owns `ONEDRIVE_ROOT`. It uploads to `ONEDRIVE_ROOT/<category name>/`, then verifies:
+It shows a code to sign in with at microsoft.com/devicelogin first: sign in with the account that owns `ONEDRIVE_ROOT`. It checks the OneDrive folder can be used, then captures, uploads to `ONEDRIVE_ROOT/<category name>/`, and verifies:
 
 1. **Complete capture**: no channel, thread, post or message appeared in Discord since capture, and Discord's message count for each thread matches.
 2. **Files downloaded**: every local file matches the manifest, and every attachment is the size Discord reported.
 3. **Upload intact**: every file is downloaded back from OneDrive and matches its SHA-256 checksum, and OneDrive holds nothing extra.
 4. **Folders reachable**: the archive folder and every channel folder have an address in OneDrive.
 
-If all four pass, `_run.json` in OneDrive is set to `verified`, an entry goes in `ARCHIVER_DATA_DIR/audit.jsonl`, and a summary is posted to `DISCORD_LOG_CHANNEL_ID`. If any fail, it lists every problem and the archive stays unverified.
+If all four pass, `_run.json` in OneDrive is set to `verified`, an entry goes in `ARCHIVER_DATA_DIR/audit.jsonl`, and a summary is posted to `DISCORD_LOG_CHANNEL_ID`. It then lists the channels, counts down 10 seconds (Ctrl+C stops it), checks once more, and deletes them (see below). Add `--keep` to archive without deleting. If any check fails, it lists every problem, the archive stays unverified, and nothing is deleted.
 
 - `ONEDRIVE_ROOT` must already exist. The tool won't create it, so a typo can't scatter archives.
 - The tool only writes into a folder it created itself for this same category (it leaves a `_run.json` there to tell). It refuses a folder with the same name made by anyone else, or for a different category, and it never changes an archive that is already verified.
@@ -96,6 +98,28 @@ If all four pass, `_run.json` in OneDrive is set to `verified`, an entry goes in
 - OneDrive's browser preview can't follow links between pages or show images. Download the folder, or use the OneDrive sync app, to browse an archive.
 
 Each file attached to a message must download at exactly the size Discord reports, or the capture stops. Images shown in link previews and stickers are saved when possible; any that can't be saved are listed in `_index.html`.
+
+### Deleting the channels
+
+`archive` deletes as its last step. To delete later instead (after `--keep` or Ctrl+C), carry on after a stop, or only check:
+
+```sh
+npm start -- delete <categoryId> --dry-run   # all the checks, deletes nothing
+npm start -- delete <categoryId>
+```
+
+Running `archive` again on a verified category goes straight to the same step.
+
+Before deleting, the tool checks once more:
+- Discord: no new channel, thread, post or message since capture;
+- OneDrive: `_run.json` still says verified, and every file is still there, unchanged (by OneDrive's own checksum), with nothing added.
+
+It lists every channel it will delete and counts down 10 seconds; Ctrl+C stops it with nothing deleted. It checks again when the countdown ends, then deletes one channel at a time (threads and forum posts go with their channel). Each deletion is saved to the run state and the audit log as it happens, and the archive's address is given as the reason in the server's audit log.
+
+- The category itself is never deleted, so it can be renamed and reused.
+- A channel moved out of the category after the archive is kept. Moving a channel out is how you keep it.
+- If anything changed, nothing is deleted. A verified archive is never changed, so to include the change, delete the archive folder in OneDrive and the run folder, then archive again.
+- If delete stops part-way (for example, the bot lacks permission on one channel), fix the cause and run it again. It carries on from where it stopped.
 
 ## Development
 

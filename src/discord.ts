@@ -68,6 +68,18 @@ export function createDiscord(token: string) {
 
     member: (guildId: string, userId: string) => unlessHidden<APIGuildMember>(get(Routes.guildMember(guildId, userId))),
 
+    // Deletes one channel, with its threads. The reason appears in the server's audit log.
+    // "gone" means it was already deleted; any other error, including no permission, is thrown.
+    deleteChannel: async (channelId: string, reason: string): Promise<'deleted' | 'gone'> => {
+      try {
+        await rest.delete(Routes.channel(channelId), { reason: reason.slice(0, 512) });
+        return 'deleted';
+      } catch (error) {
+        if (error instanceof DiscordAPIError && error.status === 404) return 'gone';
+        throw error;
+      }
+    },
+
     // Mentions are switched off: a log post must never ping anyone.
     post: async (channelId: string, content: string) => {
       await rest.post(Routes.channelMessages(channelId), { body: { content, allowed_mentions: { parse: [] } } });

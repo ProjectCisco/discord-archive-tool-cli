@@ -28,6 +28,16 @@ export interface RunState {
     // Path in the archive → SHA-256 of the copy that was uploaded. A changed file is sent again.
     files: Record<string, string>;
   };
+  deletion?: {
+    startedAt: string;
+    // Channel ID → when it was deleted (or found already gone).
+    deleted: Record<string, string>;
+    // Channel ID → why it was left in place.
+    kept?: Record<string, string>;
+    // Set just before a delete call, cleared after: shows which channel a crash interrupted.
+    inProgress?: string;
+    finishedAt?: string;
+  };
   // The last verification. Only 'verified' lets delete run.
   verification?: {
     status: 'verified' | 'failed';

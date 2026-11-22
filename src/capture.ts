@@ -10,6 +10,7 @@ import { writeManifest } from './manifest.ts';
 import { claimFileName, claimFolderName, safeName } from './names.ts';
 import { renderCategoryIndex, renderTranscript } from './render.ts';
 import { STATE_SCHEMA, readState, writeFileAtomic, writeState, type CapturedChannel, type RunState } from './state.ts';
+import { count } from './text.ts';
 import { SCHEMA_VERSION, fileKey, type ArchivedFile, type Conversation, type Person, type Thread, type Transcript } from './transcript.ts';
 
 const MESSAGE_CHANNELS = new Set<number>([
@@ -120,7 +121,8 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
     const record = await captureChannel(context, channel, folder, dir, activeThreads);
     state.channels[channel.id] = record;
     await writeState(runDir, state);
-    log(`${progress}: ${record.entry.messages} messages, ${record.entry.files} files, ${record.entry.threads} threads`);
+    const { messages, files, threads } = record.entry;
+    log(`${progress}: ${count(messages, 'message')}, ${count(files, 'file')}, ${count(threads, 'thread or post', 'threads or posts')}`);
   }
 
   const records = children.flatMap((channel) => state.channels[channel.id] ?? []);

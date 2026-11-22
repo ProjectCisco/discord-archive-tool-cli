@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import { RUN_RECORD, uploadToOneDrive, type RunRecord } from '../src/destinations/onedrive.ts';
+import { RUN_RECORD, preflightOneDrive, uploadToOneDrive, type RunRecord } from '../src/destinations/onedrive.ts';
 import { MANIFEST_NAME, writeManifest } from '../src/manifest.ts';
 import { STATE_SCHEMA, type RunState } from '../src/state.ts';
 import { fakeDrive, type FakeDrive } from './fakes/drive.ts';
@@ -171,5 +171,36 @@ describe('uploadToOneDrive', () => {
     await writeFile(join(treeDir, '_index.html'), 'changed');
     await writeManifest(treeDir);
     await assert.rejects(upload(drive), /connection reset/);
+  });
+});
+
+describe('preflightOneDrive', () => {
+  const owner = { guildId: GUILD, categoryId: CATEGORY };
+  const run = (drive: FakeDrive, categoryId = CATEGORY) =>
+    preflightOneDrive(drive.graph, 'Team/Archives', 'Archive: November 2026', { ...owner, categoryId }, () => {});
+
+  test('passes for a new archive or one of ours still in progress, and writes nothing', async () => {
+    const drive = fakeDrive();
+    drive.folder('Team/Archives');
+    await run(drive);
+    assert.deepEqual(drive.writes, []);
+
+    await upload(drive);
+    drive.writes.length = 0;
+    await run(drive);
+    assert.deepEqual(drive.writes, []);
+  });
+
+  test('stops before capture for a missing root, a folder that is not ours, or another category', async () => {
+    await assert.rejects(run(fakeDrive()), /was not found/);
+
+    const foreign = fakeDrive();
+    foreign.folder('Team/Archives/Archive_ November 2026');
+    await assert.rejects(run(foreign), /that this tool didn't create/);
+
+    const other = fakeDrive();
+    other.folder('Team/Archives');
+    await upload(other);
+    await assert.rejects(run(other, '100000000000000099'), /for a different category/);
   });
 });
