@@ -1,16 +1,15 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { ChannelType, MessageType } from 'discord-api-types/v10';
 import { captureCategory } from '../src/capture.ts';
-import { uploadToOneDrive } from '../src/destinations/onedrive.ts';
+import { uploadArchive } from '../src/archive-folder.ts';
 import { readState } from '../src/state.ts';
 import { verifyArchive, type VerifyResult } from '../src/verify.ts';
 import { CATEGORY, IMAGE, TEXT, channel, fake, message, server } from './fakes/discord.ts';
-import { fakeDrive } from './fakes/drive.ts';
+import { fakeStore } from './fakes/store.ts';
 
 // Created in 2026, so Discord's thread message count applies to it.
 const COUNTED_THREAD = '1440000000000000001';
@@ -37,15 +36,15 @@ async function archived(messageCount = 1) {
   await captureCategory({ discord: fake(world), categoryId: CATEGORY, runDir, operator: 'tester', log: () => {} });
   const state = await readState(runDir);
   assert.ok(state);
-  const drive = fakeDrive();
+  const drive = fakeStore();
   drive.folder('Team/Archives');
   const treeDir = join(runDir, 'tree');
-  await uploadToOneDrive({ graph: drive.graph, root: 'Team/Archives', treeDir, state, save: async () => {}, log: () => {} });
+  await uploadArchive({ store: drive.store, destination: 'onedrive', treeDir, state, save: async () => {}, log: () => {} });
   const folderId = state.upload?.folderId;
   assert.ok(folderId);
 
   const verify = () =>
-    verifyArchive({ discord: fake(world), graph: drive.graph, state, treeDir, folderId, log: () => {} });
+    verifyArchive({ discord: fake(world), store: drive.store, state, treeDir, folderId, log: () => {} });
   return { world, drive, treeDir, verify };
 }
 
@@ -55,8 +54,8 @@ function failures(result: VerifyResult): Record<string, string[]> {
 }
 
 describe('verifyArchive', () => {
-  test('passes all four checks on an untouched archive and records what OneDrive holds', async () => {
-    const { verify } = await archived();
+  test('passes all four checks on an untouched archive and records what the destination holds', async () => {
+    const { drive, verify } = await archived();
     const result = await verify();
     assert.deepEqual(failures(result), {});
     assert.equal(result.passed, true);
@@ -64,10 +63,7 @@ describe('verifyArchive', () => {
       result.checks.map((check) => check.name),
       ['Complete capture', 'Files downloaded', 'Upload intact', 'Folders reachable'],
     );
-    assert.deepEqual(result.remote['case-one/attachments/image.png'], {
-      size: 8,
-      quickXorHash: `qx-${createHash('sha1').update(IMAGE).digest('hex').slice(0, 8)}`,
-    });
+    assert.deepEqual(result.remote['case-one/attachments/image.png'], { size: 8, checksum: drive.checksum(IMAGE) });
   });
 
   test('fails when a message, thread or channel appears after capture', async () => {
@@ -98,7 +94,7 @@ describe('verifyArchive', () => {
     assert.deepEqual(failed['Files downloaded']?.slice(0, 1), ['case-one/attachments/image.png changed since the manifest was written']);
   });
 
-  test('fails when a file in OneDrive differs, is missing, or was added', async () => {
+  test('fails when a file in Test Drive differs, is missing, or was added', async () => {
     const { drive, verify } = await archived();
     // Same size, different bytes: only the checksum can catch this one.
     drive.tamper(`${BASE}/case-one/attachments/image.png`, 'XXXXXXXX');
@@ -108,17 +104,17 @@ describe('verifyArchive', () => {
 
     const problems = failures(await verify())['Upload intact'] ?? [];
     assert.equal(problems.length, 4, problems.join('\n'));
-    assert.ok(problems.includes("case-one/attachments/image.png in OneDrive doesn't match the local copy"));
-    assert.ok(problems.some((line) => /^case-one\/case-one\.json is 2 bytes in OneDrive, \d+ locally$/.test(line)));
-    assert.ok(problems.includes('_index.html is missing from OneDrive'));
-    assert.ok(problems.includes('case-one/notes.txt is in OneDrive but not in the archive'));
+    assert.ok(problems.includes("case-one/attachments/image.png in Test Drive doesn't match the local copy"));
+    assert.ok(problems.some((line) => /^case-one\/case-one\.json is 2 bytes in Test Drive, \d+ locally$/.test(line)));
+    assert.ok(problems.includes('_index.html is missing from Test Drive'));
+    assert.ok(problems.includes('case-one/notes.txt is in Test Drive but not in the archive'));
   });
 
-  test('fails when a channel folder is gone from OneDrive', async () => {
+  test('fails when a channel folder is gone from Test Drive', async () => {
     const { drive, verify } = await archived();
     drive.remove(`${BASE}/hearing`);
     const failed = failures(await verify());
-    assert.deepEqual(failed['Folders reachable'], ['Folder hearing has no address in OneDrive']);
-    assert.ok(failed['Upload intact']?.includes('hearing/hearing.html is missing from OneDrive'));
+    assert.deepEqual(failed['Folders reachable'], ['Folder hearing has no address in Test Drive']);
+    assert.ok(failed['Upload intact']?.includes('hearing/hearing.html is missing from Test Drive'));
   });
 });

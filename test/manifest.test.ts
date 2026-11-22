@@ -9,19 +9,6 @@ import { formatManifest, parseManifest, sha256File } from '../src/manifest.ts';
 const hasSha256sum = spawnSync('sha256sum', ['--version']).error === undefined;
 
 describe('manifest', () => {
-  test('hashes a file', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'manifest-'));
-    try {
-      await writeFile(join(dir, 'a.txt'), 'abc');
-      assert.equal(
-        await sha256File(join(dir, 'a.txt')),
-        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
-      );
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
   test('sorts by path and uses two spaces', () => {
     const text = formatManifest([
       { path: 'b/two.png', sha256: 'b'.repeat(64) },

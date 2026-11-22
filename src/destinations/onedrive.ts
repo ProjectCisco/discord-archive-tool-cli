@@ -1,206 +1,157 @@
-import { readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import type { DriveItem, Graph } from '../graph.ts';
-import { MANIFEST_NAME, parseManifest, sha256File } from '../manifest.ts';
-import { safeName } from '../names.ts';
-import type { RunState } from '../state.ts';
+import { open } from 'node:fs/promises';
+import { createSend, fail, hashBody, orNull, type Send } from '../http.ts';
+import { CHUNK_SIZE, type RemoteItem, type Store } from './store.ts';
 
-const MAX_FILE_ATTEMPTS = 3;
-export const RUN_RECORD = '_run.json';
+// OneDrive through Microsoft Graph, as plain REST. Every path is inside the signed-in account's
+// own OneDrive (/me/drive).
 
-export interface UploadOptions {
-  graph: Graph;
+const API = 'https://graph.microsoft.com/v1.0/me/drive';
+const SERVICE = 'Microsoft Graph';
+const FIELDS = 'id,name,size,webUrl,folder,file';
+const CHUNK_TIMEOUT_MS = 5 * 60_000;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+
+interface DriveItem {
+  id: string;
+  name: string;
+  webUrl: string;
+  size?: number;
+  folder?: unknown;
+  file?: { hashes?: { quickXorHash?: string } };
+}
+
+export interface OneDriveOptions {
+  token: () => Promise<string>;
   // Folder path in the OneDrive that holds every archive, e.g. "Team/Archives". Must already exist.
   root: string;
-  treeDir: string;
-  state: RunState;
-  // Called after every uploaded file, so a crash loses at most the file in flight.
-  save: () => Promise<void>;
-  log: (line: string) => void;
+  fetch?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+  chunkSize?: number;
 }
 
-export interface UploadResult {
-  folderName: string;
-  webUrl: string;
-  uploaded: number;
-  skipped: number;
-}
-
-// The run record identifies a folder as one this tool made, for this category (decision D4).
-export interface RunRecord {
-  tool: 'discord-archive-tool-cli';
-  schema: 1;
-  guildId: string;
-  categoryId: string;
-  categoryName: string;
-  status: 'in progress' | 'uploaded' | 'verified';
-  updatedAt: string;
-  // Present once verification has run: each check's name and whether it passed.
-  checks?: Array<{ name: string; passed: boolean }>;
-}
-
-export interface Owner {
-  guildId: string;
-  categoryId: string;
-}
-
-// Checks the destination before anything is captured, so a wrong account, a missing root or a
-// folder that can't be used stops the run in seconds. Writes nothing.
-export async function preflightOneDrive(
-  graph: Graph,
-  rootPath: string,
-  categoryName: string,
-  owner: Owner,
-  log: (line: string) => void,
-): Promise<void> {
-  const root = await findRoot(graph, rootPath, log);
-  await existingArchiveFolder(graph, root, safeName(categoryName), owner);
-}
-
-async function findRoot(graph: Graph, rootPath: string, log: (line: string) => void): Promise<DriveItem> {
-  const account = await graph.owner();
-  log(`Using the OneDrive of ${account}.`);
-  const root = await graph.itemByPath(rootPath);
-  if (!root?.folder) {
-    throw new Error(
-      `OneDrive folder "${rootPath}" was not found in the OneDrive of ${account}. ` +
-        'Check you signed in with the account that owns it (a folder only shared with you will not work), or fix ONEDRIVE_ROOT.',
-    );
-  }
-  return root;
-}
-
-export async function uploadToOneDrive(options: UploadOptions): Promise<UploadResult> {
-  const { graph, state, treeDir, log } = options;
-  // preflightOneDrive has already said whose OneDrive this is.
-  const root = await findRoot(graph, options.root, () => {});
-  const folderName = safeName(state.categoryName);
-  const folder = await openArchiveFolder(graph, root, folderName, state);
-  if (state.upload?.folderId !== folder.id) {
-    state.upload = { destination: 'onedrive', folderId: folder.id, webUrl: folder.webUrl, files: {} };
-  }
-  const done = state.upload.files;
-
-  const manifestText = await readFile(join(treeDir, MANIFEST_NAME), 'utf8');
-  const checksums = parseManifest(manifestText);
-  checksums.set(MANIFEST_NAME, await sha256File(join(treeDir, MANIFEST_NAME)));
-
-  // The index and manifest go last, so an archive that has them is one whose files all arrived.
-  const last = ['_index.html', MANIFEST_NAME];
-  const order = [...[...checksums.keys()].filter((path) => !last.includes(path)).sort(), ...last.filter((path) => checksums.has(path))];
-
-  const folders = new Map<string, string>([['', folder.id]]);
-  let uploaded = 0;
-  let skipped = 0;
-  for (const [index, path] of order.entries()) {
-    const sha256 = checksums.get(path);
-    if (!sha256) continue;
-    if (done[path] === sha256) {
-      skipped++;
-      continue;
-    }
-    const slash = path.lastIndexOf('/');
-    const parentId = await ensureFolders(graph, folders, slash === -1 ? '' : path.slice(0, slash));
-    const name = path.slice(slash + 1);
-    const local = join(treeDir, path);
-    await uploadWithRetries(graph, parentId, name, local, (await stat(local)).size);
-    done[path] = sha256;
-    await options.save();
-    uploaded++;
-    log(`[${index + 1}/${order.length}] ${path}`);
-  }
-
-  await writeRunRecord(graph, folder.id, state, 'uploaded');
-  return { folderName, webUrl: folder.webUrl, uploaded, skipped };
-}
-
-// D4: create the folder, or resume one this tool made for this category. Anything else stops.
-async function openArchiveFolder(graph: Graph, root: DriveItem, name: string, state: RunState): Promise<DriveItem> {
-  const existing = await existingArchiveFolder(graph, root, name, state);
-  if (existing) return existing;
-  const created = await graph.createFolder(root.id, name);
-  // First file in, so a crash can never leave a folder of ours without its run record.
-  await writeRunRecord(graph, created.id, state, 'in progress');
-  return created;
-}
-
-// Null when there's no folder by that name yet. Throws for any folder this run must not use.
-async function existingArchiveFolder(graph: Graph, root: DriveItem, name: string, owner: Owner): Promise<DriveItem | null> {
-  const existing = await graph.child(root.id, name);
-  if (!existing) return null;
-
-  const where = `OneDrive already has a folder named "${name}"`;
-  if (!existing.folder) throw new Error(`${where}, and it is a file. Rename or move it, then run again.`);
-  const recordItem = await graph.child(existing.id, RUN_RECORD);
-  if (!recordItem) {
-    throw new Error(`${where} that this tool didn't create. It won't write into it. Rename or move it, then run again.`);
-  }
-  const record = parseRunRecord(await graph.readText(recordItem.id));
-  if (!record || record.guildId !== owner.guildId || record.categoryId !== owner.categoryId) {
-    throw new Error(`${where} for a different category. Rename the category in Discord (for example, add the year), then run again.`);
-  }
-  if (record.status === 'verified') {
-    throw new Error(`${where}, and that archive is already verified. A finished archive is never changed.`);
-  }
-  return existing;
-}
-
-function parseRunRecord(text: string): RunRecord | null {
-  try {
-    const record = JSON.parse(text) as Partial<RunRecord>;
-    return record.tool === 'discord-archive-tool-cli' ? (record as RunRecord) : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function readRunRecord(graph: Graph, folderId: string): Promise<RunRecord | null> {
-  const item = await graph.child(folderId, RUN_RECORD);
-  return item ? parseRunRecord(await graph.readText(item.id)) : null;
-}
-
-export async function writeRunRecord(
-  graph: Graph,
-  folderId: string,
-  state: RunState,
-  status: RunRecord['status'],
-  checks?: RunRecord['checks'],
-): Promise<void> {
-  const record: RunRecord = {
-    tool: 'discord-archive-tool-cli',
-    schema: 1,
-    guildId: state.guildId,
-    categoryId: state.categoryId,
-    categoryName: state.categoryName,
-    status,
-    updatedAt: new Date().toISOString(),
-    ...(checks ? { checks } : {}),
+function toItem(item: DriveItem): RemoteItem {
+  return {
+    id: item.id,
+    name: item.name,
+    webUrl: item.webUrl,
+    folder: item.folder !== undefined,
+    ...(item.size !== undefined ? { size: item.size } : {}),
+    checksum: item.file?.hashes?.quickXorHash ?? null,
   };
-  await graph.uploadText(folderId, RUN_RECORD, `${JSON.stringify(record, null, 2)}\n`);
 }
 
-async function ensureFolders(graph: Graph, known: Map<string, string>, dir: string): Promise<string> {
-  const cached = known.get(dir);
-  if (cached) return cached;
-  const slash = dir.lastIndexOf('/');
-  const parentId = await ensureFolders(graph, known, slash === -1 ? '' : dir.slice(0, slash));
-  const name = dir.slice(slash + 1);
-  // Only reached inside a folder this run owns, so an existing subfolder is one we made earlier.
-  const folder = (await graph.child(parentId, name)) ?? (await graph.createFolder(parentId, name));
-  known.set(dir, folder.id);
-  return folder.id;
-}
+export function createOneDrive(options: OneDriveOptions): Store {
+  const send: Send = createSend({ service: SERVICE, token: options.token, fetch: options.fetch, sleep: options.sleep });
+  const chunkSize = options.chunkSize ?? CHUNK_SIZE;
 
-async function uploadWithRetries(graph: Graph, parentId: string, name: string, local: string, size: number): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const item = await graph.upload(parentId, name, local, size);
-      if (item.size !== undefined && item.size !== size) {
-        throw new Error(`OneDrive stored ${item.size} bytes for ${name}, expected ${size}`);
+  const json = async <T>(url: string, init: { method?: string; body?: string } = {}): Promise<T> => {
+    const response = await send(url, { ...init, headers: init.body ? { 'content-type': 'application/json' } : {} });
+    if (!response.ok) return fail(SERVICE, response);
+    return (await response.json()) as T;
+  };
+  const item = async (url: string) => toItem(await json<DriveItem>(url));
+  const encodePath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
+  const itemUrl = (id: string) => `${API}/items/${encodeURIComponent(id)}`;
+  const childUrl = (parentId: string, name: string) => `${itemUrl(parentId)}:/${encodeURIComponent(name)}:`;
+
+  // A plain PUT replaces any file of that name. Used for small files and empty ones, which an
+  // upload session can't take.
+  const put = async (parentId: string, name: string, body: Uint8Array) => {
+    const response = await send(`${childUrl(parentId, name)}/content`, { method: 'PUT', body });
+    if (!response.ok) return fail(SERVICE, response);
+    return toItem((await response.json()) as DriveItem);
+  };
+
+  const account = async () => {
+    const drive = await json<{ owner?: { user?: { displayName?: string; email?: string } } }>(API);
+    const user = drive.owner?.user;
+    return [user?.displayName, user?.email && `<${user.email}>`].filter(Boolean).join(' ') || 'unknown account';
+  };
+
+  return {
+    label: 'OneDrive',
+    account,
+
+    root: async () => {
+      const root = await orNull(item(`${API}/root:/${encodePath(options.root)}`));
+      // Never created: a mistyped path must not scatter archives.
+      if (!root?.folder) {
+        throw new Error(
+          `OneDrive folder "${options.root}" was not found in the OneDrive of ${await account()}. ` +
+            'Check you signed in with the account that owns it (a folder only shared with you will not work), or fix ONEDRIVE_ROOT.',
+        );
       }
-      return;
-    } catch (error) {
-      if (attempt >= MAX_FILE_ATTEMPTS) throw error;
-    }
-  }
+      return root;
+    },
+
+    item: (id) => item(`${itemUrl(id)}?$select=${FIELDS}`),
+
+    child: (parentId, name) => orNull(item(childUrl(parentId, name))),
+
+    children: async (folderId) => {
+      const items: RemoteItem[] = [];
+      let url: string | undefined = `${itemUrl(folderId)}/children?$select=${FIELDS}&$top=200`;
+      while (url) {
+        const page: { value: DriveItem[]; '@odata.nextLink'?: string } = await json(url);
+        items.push(...page.value.map(toItem));
+        url = page['@odata.nextLink'];
+      }
+      return items;
+    },
+
+    // Fails if anything by that name exists, so the tool never adopts a folder it didn't make.
+    createFolder: async (parentId, name) =>
+      toItem(
+        await json<DriveItem>(`${itemUrl(parentId)}/children`, {
+          method: 'POST',
+          body: JSON.stringify({ name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }),
+        }),
+      ),
+
+    readText: async (id) => {
+      const response = await send(`${itemUrl(id)}/content`);
+      if (!response.ok) return fail(SERVICE, response);
+      return response.text();
+    },
+
+    writeText: (parentId, name, text) => put(parentId, name, new TextEncoder().encode(text)),
+
+    upload: async (parentId, name, localPath, size) => {
+      if (size === 0) return put(parentId, name, new Uint8Array());
+      const session = await json<{ uploadUrl: string }>(`${childUrl(parentId, name)}/createUploadSession`, {
+        method: 'POST',
+        body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } }),
+      });
+      const file = await open(localPath, 'r');
+      try {
+        const buffer = new Uint8Array(Math.min(chunkSize, size));
+        for (let start = 0; start < size; ) {
+          const { bytesRead } = await file.read(buffer, 0, Math.min(chunkSize, size - start), start);
+          if (bytesRead === 0) throw new Error(`${localPath} is shorter than expected`);
+          const end = start + bytesRead - 1;
+          // The upload URL carries its own authorisation. Sending the token as well is refused.
+          const response = await send(session.uploadUrl, {
+            method: 'PUT',
+            auth: false,
+            timeoutMs: CHUNK_TIMEOUT_MS,
+            headers: { 'content-range': `bytes ${start}-${end}/${size}` },
+            body: buffer.subarray(0, bytesRead),
+          });
+          if (!response.ok) return fail(SERVICE, response);
+          start = end + 1;
+          if (start >= size) return toItem((await response.json()) as DriveItem);
+          await response.body?.cancel();
+        }
+      } finally {
+        await file.close();
+      }
+      throw new Error(`Upload of ${name} ended without a result`);
+    },
+
+    download: async (id) => {
+      const response = await send(`${itemUrl(id)}/content`, { timeoutMs: DOWNLOAD_TIMEOUT_MS });
+      if (!response.ok) return fail(SERVICE, response);
+      return hashBody(response);
+    },
+  };
 }

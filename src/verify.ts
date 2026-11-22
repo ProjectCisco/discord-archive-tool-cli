@@ -3,9 +3,9 @@ import { join } from 'node:path';
 import { MessageType } from 'discord-api-types/v10';
 import type { APIAttachment, APIMessage } from 'discord-api-types/v10';
 import { listThreads } from './capture.ts';
-import { RUN_RECORD } from './destinations/onedrive.ts';
+import { RUN_RECORD, walk } from './archive-folder.ts';
+import type { RemoteItem, Store } from './destinations/store.ts';
 import type { Discord, GuildChannel } from './discord.ts';
-import type { DriveItem, Graph } from './graph.ts';
 import { MANIFEST_NAME, parseManifest, sha256File } from './manifest.ts';
 import type { RunState } from './state.ts';
 import type { Conversation, Transcript } from './transcript.ts';
@@ -21,19 +21,19 @@ export interface Check {
 
 export interface RemoteFile {
   size: number;
-  quickXorHash: string | null;
+  checksum: string | null;
 }
 
 export interface VerifyResult {
   passed: boolean;
   checks: Check[];
-  // What OneDrive holds, so delete can re-check it without downloading everything again.
+  // What the destination holds, so delete can re-check it without downloading everything again.
   remote: Record<string, RemoteFile>;
 }
 
 export interface VerifyOptions {
   discord: Discord;
-  graph: Graph;
+  store: Store;
   state: RunState;
   treeDir: string;
   folderId: string;
@@ -53,10 +53,11 @@ export async function verifyArchive(options: VerifyOptions): Promise<VerifyResul
   const capture = await checkCapture(options.discord, options.state, transcripts);
   log('Check 2/4: every file saved at the size Discord reported');
   const files = await checkFiles(treeDir, transcripts, manifest);
-  log('Check 3/4: every file in OneDrive matches the local copy');
-  const { check: upload, files: remote, folders } = await checkUpload(options.graph, options.folderId, treeDir, manifest);
-  log('Check 4/4: every folder opens in OneDrive');
-  const reachable = await checkFolders(options.graph, options.folderId, options.state, folders);
+  const { store } = options;
+  log(`Check 3/4: every file in ${store.label} matches the local copy`);
+  const { check: upload, files: remote, folders } = await checkUpload(store, options.folderId, treeDir, manifest);
+  log(`Check 4/4: every folder opens in ${store.label}`);
+  const reachable = await checkFolders(store, options.folderId, options.state, folders);
 
   const checks = [capture, files, upload, reachable];
   return { passed: checks.every((check) => check.passed), checks, remote };
@@ -187,16 +188,16 @@ function attachmentSizes(transcript: Transcript): Map<string, number> {
   return sizes;
 }
 
-// Check 3: every file is in OneDrive at the right size, and reads back with the same SHA-256.
-// OneDrive holds nothing else, apart from the run record.
+// Check 3: every file is at the destination at the right size, and reads back with the same
+// SHA-256. The folder holds nothing else, apart from the run record.
 async function checkUpload(
-  graph: Graph,
+  store: Store,
   folderId: string,
   treeDir: string,
   manifest: Map<string, string>,
-): Promise<{ check: Check; files: Record<string, RemoteFile>; folders: Map<string, DriveItem> }> {
+): Promise<{ check: Check; files: Record<string, RemoteFile>; folders: Map<string, RemoteItem> }> {
   const problems: string[] = [];
-  const { files, folders } = await walk(graph, folderId);
+  const { files, folders } = await walk(store, folderId);
   const expected = new Map(manifest);
   expected.set(MANIFEST_NAME, await sha256File(join(treeDir, MANIFEST_NAME)));
 
@@ -204,47 +205,29 @@ async function checkUpload(
   for (const [path, sha256] of expected) {
     const item = files.get(path);
     if (!item) {
-      problems.push(`${path} is missing from OneDrive`);
+      problems.push(`${path} is missing from ${store.label}`);
       continue;
     }
     const local = await stat(join(treeDir, path)).then((info) => info.size, () => -1);
-    const back = await graph.downloadSha256(item.id);
-    if (back.size !== local || item.size !== local) problems.push(`${path} is ${back.size} bytes in OneDrive, ${local} locally`);
-    else if (back.sha256 !== sha256) problems.push(`${path} in OneDrive doesn't match the local copy`);
-    remote[path] = { size: back.size, quickXorHash: item.file?.hashes?.quickXorHash ?? null };
+    const back = await store.download(item.id);
+    if (back.size !== local || item.size !== local) problems.push(`${path} is ${back.size} bytes in ${store.label}, ${local} locally`);
+    else if (back.sha256 !== sha256) problems.push(`${path} in ${store.label} doesn't match the local copy`);
+    remote[path] = { size: back.size, checksum: item.checksum };
   }
 
   for (const path of files.keys()) {
-    if (path !== RUN_RECORD && !expected.has(path)) problems.push(`${path} is in OneDrive but not in the archive`);
+    if (path !== RUN_RECORD && !expected.has(path)) problems.push(`${path} is in ${store.label} but not in the archive`);
   }
   return { check: check('Upload intact', problems), files: remote, folders };
 }
 
-export async function walk(graph: Graph, folderId: string) {
-  const files = new Map<string, DriveItem>();
-  const folders = new Map<string, DriveItem>();
-  const visit = async (id: string, prefix: string) => {
-    for (const item of await graph.children(id)) {
-      const path = `${prefix}${item.name}`;
-      if (item.folder) {
-        folders.set(path, item);
-        await visit(item.id, `${path}/`);
-      } else {
-        files.set(path, item);
-      }
-    }
-  };
-  await visit(folderId, '');
-  return { files, folders };
-}
-
 // Check 4: the archive folder and every channel folder exist and have an address to open.
-async function checkFolders(graph: Graph, folderId: string, state: RunState, folders: Map<string, DriveItem>): Promise<Check> {
+async function checkFolders(store: Store, folderId: string, state: RunState, folders: Map<string, RemoteItem>): Promise<Check> {
   const problems: string[] = [];
-  const root = await graph.item(folderId).catch(() => null);
-  if (!root?.webUrl) problems.push('The archive folder has no address in OneDrive');
+  const root = await store.item(folderId).catch(() => null);
+  if (!root?.webUrl) problems.push(`The archive folder has no address in ${store.label}`);
   for (const { folder } of Object.values(state.channels)) {
-    if (!folders.get(folder)?.webUrl) problems.push(`Folder ${folder} has no address in OneDrive`);
+    if (!folders.get(folder)?.webUrl) problems.push(`Folder ${folder} has no address in ${store.label}`);
   }
   return check('Folders reachable', problems);
 }
