@@ -1,17 +1,18 @@
 import { mkdir } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs } from 'node:util';
 import { preflight, readRunRecord, uploadArchive, writeRunRecord } from './archive-folder.ts';
 import { audit } from './audit.ts';
 import { captureCategory } from './capture.ts';
-import { DESTINATIONS, isSnowflake, loadConfig, type Config, type Destination } from './config.ts';
+import { parseCommand } from './args.ts';
+import { DESTINATIONS, loadConfig, type Config, type Destination } from './config.ts';
 import { countdown } from './countdown.ts';
 import { createGoogleDrive } from './destinations/google-drive.ts';
 import { createOneDrive } from './destinations/onedrive.ts';
 import type { Store } from './destinations/store.ts';
 import { googleProvider, microsoftProvider, signIn } from './device-code.ts';
 import { createDiscord, type Discord } from './discord.ts';
+import { explain } from './errors.ts';
 import { safeName } from './names.ts';
 import { deleteChannels, plan, recheck, refusal } from './remove.ts';
 import { runReport, type DeleteOutcome } from './report.ts';
@@ -73,19 +74,24 @@ async function archive(config: Config, destination: Destination, categoryId: str
   if (before?.upload && before.upload.destination !== destination) {
     throw new Error(`This category is being archived to ${before.upload.destination}. One category goes to one destination.`);
   }
+  if (before?.verification?.status === 'verified' && keep) {
+    log(`Already archived and verified, and --keep asks to keep the channels: ${before.upload?.webUrl ?? ''}`);
+    return;
+  }
   const discord = createDiscord(config.discordToken);
   const store = await openStore(config, destination);
 
   if (before?.verification?.status === 'verified') {
     log(`\nAlready archived and verified: ${before.upload?.webUrl ?? ''}`);
-    if (!keep) await deleteAndReport({ config, runDir, state: before, discord, store, dryRun: false, checkFirst: true });
+    await deleteAndReport({ config, runDir, state: before, discord, store, dryRun: false, checkFirst: true });
     return;
   }
 
-  // Check the destination before spending time on the capture.
+  // Check the destination before spending time on the capture. A run that already started keeps
+  // the name it started with, even if the category was renamed since.
   const category = await discord.channel(categoryId);
   if (!category.guild_id) throw new Error(`${categoryId} is not a channel in a server`);
-  await preflight(store, category.name, { guildId: category.guild_id, categoryId }, log);
+  await preflight(store, before?.categoryName ?? category.name, { guildId: category.guild_id, categoryId }, log);
 
   log('');
   const { treeDir } = await capture(discord, categoryId, runDir);
@@ -275,33 +281,20 @@ async function post(discord: Discord, config: Config, messages: string[]): Promi
     for (const message of messages) await discord.post(config.logChannelId, message);
     log('Posted the summary to the log channel.');
   } catch (error) {
-    log(`Couldn't post to the log channel: ${(error as Error).message}`);
+    log(`Couldn't post to the log channel: ${explain(error)}`);
   }
 }
 
 async function main(): Promise<void> {
-  const { positionals, values } = parseArgs({
-    allowPositionals: true,
-    options: { to: { type: 'string' }, 'dry-run': { type: 'boolean' }, keep: { type: 'boolean' } },
-  });
-  const [command, categoryId, ...extra] = positionals;
-  const { to } = values;
-  const dryRun = values['dry-run'] === true;
-  const keep = values.keep === true;
-  const valid =
-    categoryId !== undefined &&
-    extra.length === 0 &&
-    ((command === 'capture' && to === undefined && !dryRun && !keep) ||
-      (command === 'archive' && to !== undefined && !dryRun) ||
-      (command === 'delete' && to === undefined && !keep));
-  if (!valid) {
+  const command = parseCommand(process.argv.slice(2));
+  if (!command) {
     log(USAGE);
     process.exitCode = 2;
     return;
   }
-  if (!isSnowflake(categoryId)) throw new Error(`"${categoryId}" is not a Discord ID`);
+  const { categoryId } = command;
 
-  if (command === 'capture') {
+  if (command.name === 'capture') {
     const config = loadConfig(process.env, null);
     await withRun(config, categoryId, async (runDir) => {
       const result = await capture(createDiscord(config.discordToken), categoryId, runDir);
@@ -310,23 +303,21 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (command === 'delete') {
+  if (command.name === 'delete') {
     // The run state says where the archive went, so read it before loading that destination's settings.
     const core = loadConfig(process.env, null);
     const destination = (await readState(join(core.dataDir, 'runs', categoryId)))?.upload?.destination;
     if (!destination) throw new Error('No archive of this category exists on this computer. Run archive first.');
     const config = loadConfig(process.env, destination);
-    await withRun(config, categoryId, (runDir) => remove(config, runDir, dryRun));
+    await withRun(config, categoryId, (runDir) => remove(config, runDir, command.dryRun));
     return;
   }
 
-  const destination = DESTINATIONS.find((name) => name === to);
-  if (!destination) throw new Error(`--to must be one of: ${DESTINATIONS.join(', ')}`);
-  const config = loadConfig(process.env, destination);
-  await withRun(config, categoryId, (runDir) => archive(config, destination, categoryId, runDir, keep));
+  const config = loadConfig(process.env, command.destination);
+  await withRun(config, categoryId, (runDir) => archive(config, command.destination, categoryId, runDir, command.keep));
 }
 
 main().catch((error: unknown) => {
-  console.error(`Stopped: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`Stopped: ${explain(error)}`);
   process.exitCode = 1;
 });

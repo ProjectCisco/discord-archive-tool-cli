@@ -100,3 +100,20 @@ describe('claimFileName', () => {
     assert.ok(name.length <= 80);
   });
 });
+
+describe('names from Discord can never leave the archive folder', () => {
+  test('turns path tricks and broken extensions into plain, valid names', () => {
+    const taken = new Set<string>();
+    const names = ['../../secrets.txt', '..', '.', 'C:\\Windows\\evil.dll', 'trailing.', 'photo.png ', 'x.<script>', '.env'].map((raw) =>
+      claimFileName(raw, taken),
+    );
+    for (const name of names) {
+      assert.ok(!name.includes('/') && !name.includes('\\'), name);
+      assert.ok(name !== '.' && name !== '..', name);
+      assert.ok(!/[. ]$/.test(name), `"${name}" ends with a dot or space`);
+    }
+    assert.ok(names.includes('photo.png'), 'a real extension survives');
+    assert.ok(names.includes('.env'), 'a name that is only an extension keeps its dot');
+    assert.deepEqual([safeName('..'), safeName('../x')], ['_', '.._x']);
+  });
+});

@@ -94,6 +94,12 @@ describe('createOneDrive', () => {
     );
     assert.equal((await graph.child('parent', 'x'))?.id, 'done');
     assert.deepEqual(waits, [7000, 7000]);
+
+    // A request to wait an hour is capped at two minutes.
+    let again = 0;
+    const capped = fakeGraph(() => (++again < 2 ? new Response(null, { status: 503, headers: { 'retry-after': '3600' } }) : item('done')));
+    await capped.graph.child('parent', 'x');
+    assert.deepEqual(capped.waits, [120_000]);
   });
 
   test('gives up after five tries', async () => {

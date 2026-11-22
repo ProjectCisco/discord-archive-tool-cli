@@ -3,10 +3,12 @@ import { join } from 'node:path';
 import { MessageType } from 'discord-api-types/v10';
 import type { APIAttachment, APIMessage } from 'discord-api-types/v10';
 import { listThreads } from './capture.ts';
-import { RUN_RECORD, walk } from './archive-folder.ts';
+import { walk } from './archive-folder.ts';
 import type { RemoteItem, Store } from './destinations/store.ts';
 import type { Discord, GuildChannel } from './discord.ts';
-import { MANIFEST_NAME, parseManifest, sha256File } from './manifest.ts';
+import { explain } from './errors.ts';
+import { MANIFEST_PATH, RUN_RECORD_PATH, transcriptPath } from './layout.ts';
+import { parseManifest, sha256File } from './manifest.ts';
 import type { RunState } from './state.ts';
 import type { Conversation, Transcript } from './transcript.ts';
 
@@ -47,7 +49,7 @@ const DISCORD_EPOCH = 1420070400000n;
 export async function verifyArchive(options: VerifyOptions): Promise<VerifyResult> {
   const { treeDir, log } = options;
   const transcripts = await readTranscripts(treeDir, options.state);
-  const manifest = parseManifest(await readFile(join(treeDir, MANIFEST_NAME), 'utf8'));
+  const manifest = parseManifest(await readFile(join(treeDir, MANIFEST_PATH), 'utf8'));
 
   log('Check 1/4: nothing new in Discord since capture');
   const capture = await checkCapture(options.discord, options.state, transcripts);
@@ -71,7 +73,7 @@ export async function readTranscripts(treeDir: string, state: RunState): Promise
   const records = Object.values(state.channels);
   const result: Array<{ folder: string; transcript: Transcript }> = [];
   for (const { folder } of records) {
-    const text = await readFile(join(treeDir, folder, `${folder}.json`), 'utf8');
+    const text = await readFile(join(treeDir, transcriptPath(folder)), 'utf8');
     result.push({ folder, transcript: JSON.parse(text) as Transcript });
   }
   return result;
@@ -122,7 +124,7 @@ async function newerMessages(discord: Discord, conversation: Conversation): Prom
     const page = await discord.messagesAfter(conversation.channel.id, last);
     return page.length === 0 ? null : `#${conversation.channel.name} has new messages since capture`;
   } catch (error) {
-    return `#${conversation.channel.name} couldn't be read again: ${(error as Error).message}`;
+    return `#${conversation.channel.name} couldn't be read again: ${explain(error)}`;
   }
 }
 
@@ -199,7 +201,7 @@ async function checkUpload(
   const problems: string[] = [];
   const { files, folders } = await walk(store, folderId);
   const expected = new Map(manifest);
-  expected.set(MANIFEST_NAME, await sha256File(join(treeDir, MANIFEST_NAME)));
+  expected.set(MANIFEST_PATH, await sha256File(join(treeDir, MANIFEST_PATH)));
 
   const remote: Record<string, RemoteFile> = {};
   for (const [path, sha256] of expected) {
@@ -216,7 +218,7 @@ async function checkUpload(
   }
 
   for (const path of files.keys()) {
-    if (path !== RUN_RECORD && !expected.has(path)) problems.push(`${path} is in ${store.label} but not in the archive`);
+    if (path !== RUN_RECORD_PATH && !expected.has(path)) problems.push(`${path} is in ${store.label} but not in the archive`);
   }
   return { check: check('Upload intact', problems), files: remote, folders };
 }

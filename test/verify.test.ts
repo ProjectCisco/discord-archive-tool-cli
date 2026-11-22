@@ -98,14 +98,14 @@ describe('verifyArchive', () => {
     const { drive, verify } = await archived();
     // Same size, different bytes: only the checksum can catch this one.
     drive.tamper(`${BASE}/case-one/attachments/image.png`, 'XXXXXXXX');
-    drive.tamper(`${BASE}/case-one/case-one.json`, '{}');
+    drive.tamper(`${BASE}/_data/case-one.json`, '{}');
     drive.remove(`${BASE}/_index.html`);
     drive.add(drive.folder(`${BASE}/case-one`).id, 'notes.txt', false, new TextEncoder().encode('stray'));
 
     const problems = failures(await verify())['Upload intact'] ?? [];
     assert.equal(problems.length, 4, problems.join('\n'));
     assert.ok(problems.includes("case-one/attachments/image.png in Test Drive doesn't match the local copy"));
-    assert.ok(problems.some((line) => /^case-one\/case-one\.json is 2 bytes in Test Drive, \d+ locally$/.test(line)));
+    assert.ok(problems.some((line) => /^_data\/case-one\.json is 2 bytes in Test Drive, \d+ locally$/.test(line)));
     assert.ok(problems.includes('_index.html is missing from Test Drive'));
     assert.ok(problems.includes('case-one/notes.txt is in Test Drive but not in the archive'));
   });

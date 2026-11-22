@@ -1,7 +1,8 @@
 import { join } from 'node:path';
-import { RUN_RECORD, readRunRecord, walk } from './archive-folder.ts';
+import { readRunRecord, walk } from './archive-folder.ts';
 import type { Store } from './destinations/store.ts';
 import type { Discord } from './discord.ts';
+import { RUN_RECORD_PATH } from './layout.ts';
 import { sha256File } from './manifest.ts';
 import type { RunState } from './state.ts';
 import { checkCapture, readTranscripts } from './verify.ts';
@@ -39,7 +40,7 @@ export async function recheck(options: RecheckOptions): Promise<string[]> {
   // service's own checksum, so nothing needs downloading), and nothing was added.
   const where = store.label;
   const record = await readRunRecord(store, upload.folderId).catch(() => null);
-  if (record?.status !== 'verified') problems.push(`${RUN_RECORD} in ${where} no longer says verified`);
+  if (record?.status !== 'verified') problems.push(`${RUN_RECORD_PATH} in ${where} no longer says verified`);
 
   const { files } = await walk(store, upload.folderId);
   for (const [path, expected] of Object.entries(remote)) {
@@ -53,7 +54,7 @@ export async function recheck(options: RecheckOptions): Promise<string[]> {
     }
   }
   for (const path of files.keys()) {
-    if (path !== RUN_RECORD && !remote[path]) problems.push(`${path} was added to ${where} after verification`);
+    if (path !== RUN_RECORD_PATH && !remote[path]) problems.push(`${path} was added to ${where} after verification`);
   }
   return problems;
 }

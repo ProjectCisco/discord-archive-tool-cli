@@ -24,19 +24,21 @@ If any check fails, nothing is deleted and the tool tells you why. A crash at an
 ## What you get
 
 ```
-<Category name>/
+<category name>/
   _index.html               start here: every channel, with counts
-  _manifest-sha256.txt      checksum of every file (check it with: sha256sum -c)
-  _run.json                 run record and check results (at the destination only)
   <channel>/
-    <channel>.html          the whole chat, threads included. Open this one.
-    <channel>.json          Discord's original data, for reprocessing later
+    <channel>.html          the whole chat, threads included
     attachments/            the original files
   <forum>/
     <forum>.html            every post on one page, with a list at the top
-    <forum>.json
     attachments/
+  _data/                    for the tool, not for reading:
+    <channel>.json          Discord's original data, so pages can be rebuilt later
+    _manifest-sha256.txt    checksum of every file
+    _run.json               "verified" record (at the destination only)
 ```
+
+Folders and pages are named after the Discord channel. Characters OneDrive can't take become `_`, and a second channel with the same name gets the end of its ID, e.g. `appeal (851068)`. To check every file by hand, run `sha256sum -c _data/_manifest-sha256.txt` in the archive folder.
 
 Each chat page shows who said what and when (in UTC), replies, forwards, edits, pins, reactions, embeds, polls and Discord's text formatting. Each thread appears right under the message that started it. Mentions are shown as names, with the Discord ID kept alongside. The pages never load anything from the internet, and they can't run scripts.
 
@@ -70,17 +72,7 @@ Fill in `.env`. Every setting is explained in `.env.example`. Never commit `.env
 
 ## Usage
 
-Turn on Developer Mode in Discord (**User Settings → Advanced**), right-click the category and choose **Copy Category ID**. Then:
-
-```sh
-npm start -- capture <categoryId>
-```
-
-This saves every channel, thread and forum post in the category to `ARCHIVER_DATA_DIR/runs/<categoryId>/tree/`. Open `_index.html` there to browse it. It only reads from Discord: it uploads nothing and deletes nothing.
-
-If it stops part-way, run the same command again. Channels already saved are skipped.
-
-To archive:
+Turn on Developer Mode in Discord (**User Settings → Advanced**), right-click the category and choose **Copy Category ID**. The category's name becomes the archive folder's name, so set it first, e.g. `2026-11 November`. Then:
 
 ```sh
 npm start -- archive <categoryId> --to onedrive
@@ -94,11 +86,11 @@ It shows a code to sign in with first. It checks the destination folder can be u
 3. **Upload intact**: every file is downloaded back and matches its SHA-256 checksum, and the folder holds nothing extra.
 4. **Folders reachable**: the archive folder and every channel folder have an address you can open.
 
-If all four pass, `_run.json` in the archive folder is set to `verified`, an entry goes in `ARCHIVER_DATA_DIR/audit.jsonl`, and a summary is posted to `DISCORD_LOG_CHANNEL_ID`. It then lists the channels, counts down 10 seconds (Ctrl+C stops it), checks once more, and deletes them (see below). Add `--keep` to archive without deleting. If any check fails, it lists every problem, the archive stays unverified, and nothing is deleted.
+If all four pass, `_data/_run.json` in the archive folder is set to `verified`, an entry goes in `ARCHIVER_DATA_DIR/audit.jsonl`, and a summary is posted to `DISCORD_LOG_CHANNEL_ID`. It then lists the channels, counts down 10 seconds (Ctrl+C stops it), checks once more, and deletes them (see below). Add `--keep` to archive without deleting. If any check fails, it lists every problem, the archive stays unverified, and nothing is deleted.
 
 - **OneDrive:** `ONEDRIVE_ROOT` must already exist. The tool won't create it, so a typo can't scatter archives.
 - **Google Drive:** the tool can only see folders it made itself, so on the first run it creates `GOOGLE_DRIVE_ROOT` in your My Drive. Move or share that folder as you like; the tool still finds it. A folder you made yourself with the same name is invisible to it.
-- The tool only writes into a folder it created itself for this same category (it leaves a `_run.json` there to tell). It refuses a folder with the same name made by anyone else, or for a different category, and it never changes an archive that is already verified.
+- The tool only writes into a folder it created itself for this same category (it leaves `_data/_run.json` there to tell). It refuses a folder with the same name made by anyone else, or for a different category, and it never changes an archive that is already verified.
 - If it stops part-way, run the same command again. Files already uploaded are skipped.
 - Browser previews in OneDrive and Google Drive can't follow links between pages or show images. Download the folder, or use the sync app, to browse an archive.
 
@@ -117,7 +109,7 @@ Running `archive` again on a verified category goes straight to the same step.
 
 Before deleting, the tool checks once more:
 - Discord: no new channel, thread, post or message since capture;
-- OneDrive: `_run.json` still says verified, and every file is still there, unchanged (by OneDrive's own checksum), with nothing added.
+- The destination: `_data/_run.json` still says verified, and every file is still there, unchanged (by the service's own checksum), with nothing added.
 
 It lists every channel it will delete and counts down 10 seconds; Ctrl+C stops it with nothing deleted. It checks again when the countdown ends, then deletes one channel at a time (threads and forum posts go with their channel). Each deletion is saved to the run state and the audit log as it happens, and the archive's address is given as the reason in the server's audit log.
 
@@ -134,7 +126,9 @@ npm test        # unit tests
 npm audit       # known vulnerabilities in dependencies
 ```
 
-The TypeScript runs directly on Node.js, with no build step. Tests use Node's built-in test runner and never contact Discord or Microsoft.
+The TypeScript runs directly on Node.js, with no build step. Tests use Node's built-in test runner and never contact Discord, Microsoft or Google.
+
+To see what a category would look like without uploading or deleting anything, `npm start -- capture <categoryId>` saves it to `ARCHIVER_DATA_DIR/runs/<categoryId>/tree/`.
 
 ## Responsible use
 

@@ -42,3 +42,13 @@ describe('manifest', () => {
     }
   });
 });
+
+describe('parseManifest paths', () => {
+  test('rejects any path that would leave the archive', () => {
+    const sum = 'a'.repeat(64);
+    for (const path of ['../outside.txt', '/etc/passwd', 'a/../../b', 'a//b', './a']) {
+      assert.throws(() => parseManifest(`${sum}  ${path}\n`), /leaves the archive/, path);
+    }
+    assert.equal(parseManifest(`${sum}  case-one/attachments/a b.png\n`).size, 1);
+  });
+});

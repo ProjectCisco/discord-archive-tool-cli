@@ -25,6 +25,17 @@ export interface Download {
 
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
+// Files are only fetched from Discord's own servers. An embed can point anywhere, including
+// addresses inside your own network, so anything else is never requested.
+export function isDiscordMedia(url: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(url);
+    return protocol === 'https:' && (hostname === 'cdn.discordapp.com' || hostname === 'media.discordapp.net' || /^images-ext-\d+\.discordapp\.net$/.test(hostname));
+  } catch {
+    return false;
+  }
+}
+
 export function createDiscord(token: string) {
   const rest = new REST({ version: '10' }).setToken(token);
 
@@ -87,7 +98,12 @@ export function createDiscord(token: string) {
 
     // Attachment URLs are signed and expire, so they are never logged.
     download: async (url: string): Promise<Download> => {
+      if (!isDiscordMedia(url)) throw new Error('not hosted by Discord, so not downloaded');
       const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+      if (!isDiscordMedia(response.url)) {
+        await response.body?.cancel();
+        throw new Error('redirected away from Discord, so not downloaded');
+      }
       if (!response.ok || !response.body) throw new Error(`download failed with HTTP ${response.status}`);
       const length = response.headers.get('content-length');
       return {

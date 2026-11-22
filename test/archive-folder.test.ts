@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import { RUN_RECORD, preflight, uploadArchive, type RunRecord } from '../src/archive-folder.ts';
-import { MANIFEST_NAME, writeManifest } from '../src/manifest.ts';
+import { preflight, uploadArchive, type RunRecord } from '../src/archive-folder.ts';
+import { MANIFEST_PATH, RUN_RECORD_PATH } from '../src/layout.ts';
+import { writeManifest } from '../src/manifest.ts';
 import { STATE_SCHEMA, type RunState } from '../src/state.ts';
 import { fakeStore, type FakeStore } from './fakes/store.ts';
 
@@ -50,7 +51,7 @@ async function upload(drive: FakeStore, run = state(), saves: number[] = []) {
 }
 
 const record = (drive: FakeStore) =>
-  JSON.parse(drive.text(`Team/Archives/Archive_ November 2026/${RUN_RECORD}`) ?? 'null') as RunRecord | null;
+  JSON.parse(drive.text(`Team/Archives/Archive_ November 2026/${RUN_RECORD_PATH}`) ?? 'null') as RunRecord | null;
 
 describe('uploadArchive', () => {
   test('creates the folder, writes the run record first and the index and manifest last', async () => {
@@ -62,13 +63,13 @@ describe('uploadArchive', () => {
     assert.equal(result.folderName, 'Archive_ November 2026');
     assert.equal(result.uploaded, 5);
     assert.deepEqual(drive.writes, [
-      `${base}/${RUN_RECORD}`,
+      `${base}/${RUN_RECORD_PATH}`,
       `${base}/case-one/attachments/image.png`,
       `${base}/case-one/case-one.html`,
       `${base}/case-one/case-one.json`,
       `${base}/_index.html`,
-      `${base}/${MANIFEST_NAME}`,
-      `${base}/${RUN_RECORD}`,
+      `${base}/${MANIFEST_PATH}`,
+      `${base}/${RUN_RECORD_PATH}`,
     ]);
     assert.equal(drive.text(`${base}/case-one/attachments/image.png`), 'png');
     assert.deepEqual(
@@ -92,8 +93,8 @@ describe('uploadArchive', () => {
     assert.equal(again.skipped, 3);
     assert.deepEqual(drive.writes, [
       'Team/Archives/Archive_ November 2026/case-one/case-one.html',
-      `Team/Archives/Archive_ November 2026/${MANIFEST_NAME}`,
-      `Team/Archives/Archive_ November 2026/${RUN_RECORD}`,
+      `Team/Archives/Archive_ November 2026/${MANIFEST_PATH}`,
+      `Team/Archives/Archive_ November 2026/${RUN_RECORD_PATH}`,
     ]);
   });
 
@@ -125,7 +126,7 @@ describe('uploadArchive', () => {
 
   test('never changes an archive that is already verified', async () => {
     const drive = fakeStore();
-    const folder = drive.folder('Team/Archives/Archive_ November 2026');
+    const data = drive.folder('Team/Archives/Archive_ November 2026/_data');
     const verified: RunRecord = {
       tool: 'discord-archive-tool-cli',
       schema: 1,
@@ -135,15 +136,15 @@ describe('uploadArchive', () => {
       status: 'verified',
       updatedAt: '2026-11-01T00:00:00.000Z',
     };
-    drive.add(folder.id, RUN_RECORD, false, new TextEncoder().encode(JSON.stringify(verified)));
+    drive.add(data.id, '_run.json', false, new TextEncoder().encode(JSON.stringify(verified)));
     await assert.rejects(upload(drive), /already verified/);
     assert.deepEqual(drive.writes, []);
   });
 
   test('treats an unreadable run record as someone else’s folder', async () => {
     const drive = fakeStore();
-    const folder = drive.folder('Team/Archives/Archive_ November 2026');
-    drive.add(folder.id, RUN_RECORD, false, new TextEncoder().encode('not json'));
+    const data = drive.folder('Team/Archives/Archive_ November 2026/_data');
+    drive.add(data.id, '_run.json', false, new TextEncoder().encode('not json'));
     await assert.rejects(upload(drive), /for a different category/);
   });
 

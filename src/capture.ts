@@ -6,6 +6,8 @@ import { pipeline } from 'node:stream/promises';
 import { ChannelType, MessageReferenceType, MessageType, StickerFormatType } from 'discord-api-types/v10';
 import type { APIAttachment, APIMessage, APIUser } from 'discord-api-types/v10';
 import type { Discord, Download, GuildChannel } from './discord.ts';
+import { explain } from './errors.ts';
+import { DATA_DIR, INDEX_NAME, transcriptPath } from './layout.ts';
 import { writeManifest } from './manifest.ts';
 import { claimFileName, claimFolderName, safeName } from './names.ts';
 import { renderCategoryIndex, renderTranscript } from './render.ts';
@@ -21,6 +23,10 @@ const MESSAGE_CHANNELS = new Set<number>([
 ]);
 const THREAD_PARENTS = new Set<number>([ChannelType.GuildText, ChannelType.GuildAnnouncement]);
 const FORUM_CHANNELS = new Set<number>([ChannelType.GuildForum, ChannelType.GuildMedia]);
+// Ceilings that stop a bad or hostile server filling the disk. Discord's largest upload is 500 MiB;
+// a served original can be bigger than Discord's record (decision D32), hence the headroom.
+const MAX_ATTACHMENT_BYTES = 1024 ** 3;
+const MAX_BEST_EFFORT_BYTES = 50 * 1024 ** 2;
 
 export interface CaptureOptions {
   discord: Discord;
@@ -42,6 +48,7 @@ export interface CaptureResult {
 
 interface Context {
   discord: Discord;
+  treeDir: string;
   guild: { id: string; name: string };
   category: { id: string; name: string };
   archivedAt: string;
@@ -91,9 +98,13 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
     channels: {},
   };
 
+  const treeDir = join(runDir, 'tree');
+  await mkdir(join(treeDir, DATA_DIR), { recursive: true });
+
   const activeThreads = await discord.activeThreads(guild.id);
   const context: Context = {
     discord,
+    treeDir,
     guild: { id: guild.id, name: guild.name },
     category: { id: category.id, name: category.name },
     archivedAt: state.startedAt,
@@ -102,10 +113,8 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
     people: new Map(),
   };
 
-  const treeDir = join(runDir, 'tree');
-  await mkdir(treeDir, { recursive: true });
-
-  const taken = new Set(Object.values(state.channels).map((done) => done.folder.toLowerCase()));
+  // _data is the tool's own folder, so no channel may take that name.
+  const taken = new Set([DATA_DIR, ...Object.values(state.channels).map((done) => done.folder.toLowerCase())]);
   for (const [index, channel] of children.entries()) {
     const progress = `[${index + 1}/${children.length}] #${channel.name}`;
     const done = state.channels[channel.id];
@@ -116,7 +125,9 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
 
     const folder = claimFolderName(channel.name, channel.id, taken);
     const dir = join(treeDir, folder);
+    // Anything left by an unfinished earlier attempt is thrown away, so nothing stale mixes in.
     await rm(dir, { recursive: true, force: true });
+    await rm(join(treeDir, transcriptPath(folder)), { force: true });
 
     const record = await captureChannel(context, channel, folder, dir, activeThreads);
     state.channels[channel.id] = record;
@@ -129,7 +140,7 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
   const misses = records.flatMap((record) => record.misses);
   const converted = records.reduce((sum, record) => sum + record.converted, 0);
   await writeFileAtomic(
-    join(treeDir, '_index.html'),
+    join(treeDir, INDEX_NAME),
     renderCategoryIndex({
       guildName: guild.name,
       categoryName: category.name,
@@ -194,7 +205,7 @@ async function captureChannel(
     },
     files: files.saved,
   };
-  await writeFileAtomic(join(dir, `${folder}.json`), JSON.stringify(transcript, null, 2));
+  await writeFileAtomic(join(context.treeDir, transcriptPath(folder)), JSON.stringify(transcript, null, 2));
   await writeFileAtomic(join(dir, `${folder}.html`), renderTranscript(transcript));
 
   const saved = Object.values(files.saved);
@@ -284,8 +295,8 @@ async function saveFiles(context: Context, channel: GuildChannel, message: APIMe
       if (!url) continue;
       const label = `embed image in message ${message.id} in #${channel.name}`;
       const saved = await saveBestEffort(context, url, files, `embed-${index + 1}${imageExtension(url)}`);
-      if (saved) files.saved[fileKey.embed(prefix, index)] = saved;
-      else files.misses.push(label);
+      if (typeof saved === 'string') files.misses.push(`${label} (${saved})`);
+      else files.saved[fileKey.embed(prefix, index)] = saved;
     }
   }
 
@@ -298,8 +309,8 @@ async function saveFiles(context: Context, channel: GuildChannel, message: APIMe
     const extension = sticker.format_type === StickerFormatType.GIF ? '.gif' : '.png';
     const url = `https://media.discordapp.net/stickers/${sticker.id}${extension}`;
     const saved = await saveBestEffort(context, url, files, `sticker-${safeName(sticker.name)}${extension}`);
-    if (saved) files.saved[fileKey.sticker(sticker.id)] = saved;
-    else files.misses.push(label);
+    if (typeof saved === 'string') files.misses.push(`${label} (${saved})`);
+    else files.saved[fileKey.sticker(sticker.id)] = saved;
   }
 }
 
@@ -332,19 +343,20 @@ async function saveAttachment(
       return await attempt(renewed.url);
     } catch (error) {
       throw new Error(
-        `Couldn't download "${attachment.filename}" from message ${messageId} in #${channel.name}: ${(error as Error).message}`,
+        `Couldn't download "${attachment.filename}" from message ${messageId} in #${channel.name}: ${explain(error)}`,
       );
     }
   }
 }
 
-async function saveBestEffort(context: Context, url: string, files: Files, name: string): Promise<ArchivedFile | null> {
+// Returns why, when the file couldn't be saved. A miss is listed in _index.html, never silent.
+async function saveBestEffort(context: Context, url: string, files: Files, name: string): Promise<ArchivedFile | string> {
   const path = `attachments/${claimFileName(name, files.taken)}`;
   try {
     const saved = await download(context.discord, url, join(files.dir, path), null);
     return { path, size: saved.size, sha256: saved.sha256, required: false };
-  } catch {
-    return null;
+  } catch (error) {
+    return explain(error);
   }
 }
 
@@ -369,9 +381,11 @@ async function download(
     await pipeline(
       response.body,
       async function* (source: AsyncIterable<Uint8Array>) {
+        const limit = expected ? MAX_ATTACHMENT_BYTES : MAX_BEST_EFFORT_BYTES;
         for await (const chunk of source) {
-          hash.update(chunk);
           size += chunk.byteLength;
+          if (size > limit) throw new Error(`larger than ${limit / 1024 ** 2} MiB, so not saved`);
+          hash.update(chunk);
           yield chunk;
         }
       },

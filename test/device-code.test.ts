@@ -57,6 +57,20 @@ describe('signIn', () => {
     assert.equal(await tokens.token(), 'access-g');
   });
 
+  test('treats a dropped connection while waiting for the person as one missed poll', async () => {
+    const fake = fakeProvider([token('access-1')]);
+    let dropped = false;
+    const flaky = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (fake.calls.length === 1 && !dropped) {
+        dropped = true;
+        throw new TypeError('fetch failed');
+      }
+      return fake.options(microsoft).fetch(url, init);
+    }) as typeof fetch;
+    const tokens = await signIn({ ...fake.options(microsoft), fetch: flaky });
+    assert.equal(await tokens.token(), 'access-1');
+  });
+
   test('stops when the person declines, with either service’s wording', async () => {
     for (const error of ['authorization_declined', 'access_denied']) {
       const fake = fakeProvider([[400, { error }]]);
