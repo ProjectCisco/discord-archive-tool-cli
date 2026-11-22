@@ -4,7 +4,7 @@ A command-line tool that archives a Discord category — every channel, thread a
 
 Built for server staff who need to keep records (moderation cases, tickets, appeals) without keeping hundreds of old channels open.
 
-> **Status: in development.** You can capture a category to your own computer now. Uploading, verifying and deleting are being built next. Nothing in this repository can delete anything yet.
+> **Status: in development.** You can capture a category and upload it to OneDrive now. Verifying and deleting are being built next. Nothing in this repository can delete anything yet.
 
 ## How it keeps your data safe
 
@@ -42,7 +42,7 @@ Each chat page shows who said what and when (in UTC), replies, forwards, edits, 
 
 | Destination | Status |
 |---|---|
-| Microsoft OneDrive | In development |
+| Microsoft OneDrive | Uploads work; verification in development |
 | Local folder on your computer | Planned |
 | Google Drive | Planned |
 
@@ -74,6 +74,18 @@ npm start -- capture <categoryId>
 This saves every channel, thread and forum post in the category to `ARCHIVER_DATA_DIR/runs/<categoryId>/tree/`. Open `_index.html` there to browse it. It only reads from Discord: it uploads nothing and deletes nothing.
 
 If it stops part-way, run the same command again. Channels already saved are skipped.
+
+To upload to OneDrive as well:
+
+```sh
+npm start -- archive <categoryId> --to onedrive
+```
+
+It captures first, then shows a code to sign in with at microsoft.com/devicelogin. Sign in with the account that owns `ONEDRIVE_ROOT`. It then uploads to `ONEDRIVE_ROOT/<category name>/`, and prints the folder's address.
+
+- `ONEDRIVE_ROOT` must already exist. The tool won't create it, so a typo can't scatter archives.
+- The tool only writes into a folder it created itself for this same category (it leaves a `_run.json` there to tell). It refuses a folder with the same name made by anyone else, or for a different category, and it never changes an archive that is already verified.
+- If it stops part-way, run the same command again. Files already uploaded are skipped.
 
 Each file attached to a message must download at exactly the size Discord reports, or the capture stops. Images shown in link previews and stickers are saved when possible; any that can't be saved are listed in `_index.html`.
 

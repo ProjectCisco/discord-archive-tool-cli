@@ -20,6 +20,13 @@ export interface RunState {
   startedAt: string;
   // Keyed by channel ID. A channel appears here only once it is fully on disk.
   channels: Record<string, CapturedChannel>;
+  upload?: {
+    destination: 'onedrive';
+    folderId: string;
+    webUrl: string;
+    // Path in the archive → SHA-256 of the copy that was uploaded. A changed file is sent again.
+    files: Record<string, string>;
+  };
 }
 
 // Write, flush, then rename: a crash leaves either the old file or the new one, never half of either.
