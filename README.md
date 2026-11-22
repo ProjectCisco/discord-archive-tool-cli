@@ -4,7 +4,7 @@ A command-line tool that archives a Discord category — every channel, thread a
 
 Built for server staff who need to keep records (moderation cases, tickets, appeals) without keeping hundreds of old channels open.
 
-> **Status: in development.** The building blocks (safe file names, offline HTML transcripts, checksum manifests) are done and tested. Reading from Discord, uploading and deleting are being built next. Nothing in this repository can delete anything yet.
+> **Status: in development.** You can capture a category to your own computer now. Uploading, verifying and deleting are being built next. Nothing in this repository can delete anything yet.
 
 ## How it keeps your data safe
 
@@ -23,20 +23,20 @@ If any check fails, nothing is deleted and the tool tells you why. A crash at an
 
 ```
 <Category name>/
-  _index.html               what was archived, when, and counts
+  _index.html               start here: every channel, with counts
   _manifest-sha256.txt      checksum of every file (check it with: sha256sum -c)
-  _run.json                 verification results
+  _run.json                 run record and check results (at the destination only)
   <channel>/
-    transcript.html         readable offline, in any browser, years from now
-    transcript.json         Discord's original data, for reprocessing later
+    <channel>.html          the whole chat, threads included. Open this one.
+    <channel>.json          Discord's original data, for reprocessing later
     attachments/            the original files
-    threads/<thread>/       each thread, in the same format
   <forum>/
-    posts.html              list of every post
-    <post>/                 each post, in the same format
+    <forum>.html            every post on one page, with a list at the top
+    <forum>.json
+    attachments/
 ```
 
-Transcripts show who said what and when (in UTC), replies, forwards, edits, pins, reactions, embeds, polls and threads. Mentions are shown as names, with the Discord ID kept alongside. Transcripts never load anything from the internet, and they can't run scripts.
+Each chat page shows who said what and when (in UTC), replies, forwards, edits, pins, reactions, embeds, polls and Discord's text formatting. Each thread appears right under the message that started it. Mentions are shown as names, with the Discord ID kept alongside. The pages never load anything from the internet, and they can't run scripts.
 
 ## Destinations
 
@@ -62,6 +62,20 @@ cp .env.example .env
 ```
 
 Fill in `.env`. Every setting is explained in `.env.example`. Never commit `.env` — it holds your bot token, and `.gitignore` already excludes it.
+
+## Usage
+
+Turn on Developer Mode in Discord (**User Settings → Advanced**), right-click the category and choose **Copy Category ID**. Then:
+
+```sh
+npm start -- capture <categoryId>
+```
+
+This saves every channel, thread and forum post in the category to `ARCHIVER_DATA_DIR/runs/<categoryId>/tree/`. Open `_index.html` there to browse it. It only reads from Discord: it uploads nothing and deletes nothing.
+
+If it stops part-way, run the same command again. Channels already saved are skipped.
+
+Each file attached to a message must download at exactly the size Discord reports, or the capture stops. Images shown in link previews and stickers are saved when possible; any that can't be saved are listed in `_index.html`.
 
 ## Development
 

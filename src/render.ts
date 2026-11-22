@@ -1,8 +1,8 @@
 import { MessageReferenceType, MessageType } from 'discord-api-types/v10';
 import type { APIAttachment, APIEmbed, APIMessage, APIUser } from 'discord-api-types/v10';
-import { fileKey, type Person, type Transcript } from './transcript.ts';
-
-const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+import { escapeHtml } from './html.ts';
+import { renderMarkdown } from './markdown.ts';
+import { fileKey, type Person, type Thread, type Transcript } from './transcript.ts';
 
 const CONVERSATION = new Set<MessageType>([
   MessageType.Default,
@@ -46,11 +46,18 @@ img{max-width:400px;max-height:400px;display:block;margin:4px 0}
 .reaction{display:inline-block;border:1px solid #d0d7de;border-radius:10px;padding:0 6px;margin:4px 4px 0 0;font-size:12px}
 table{border-collapse:collapse}
 th,td{padding:4px 12px 4px 0;border-bottom:1px solid #eaeef2;text-align:left}
+nav.back{margin:0 0 6px;font-size:13px}
+h2{font-size:16px;margin:16px 0 4px}
+.thread{margin:4px 0 8px 24px;padding-left:12px;border-left:3px solid #d0d7de}
+.post{margin-top:24px;padding-top:8px;border-top:2px solid #d0d7de}
+code{background:#f6f8fa;border-radius:3px;padding:0 3px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+pre{background:#f6f8fa;border-radius:4px;padding:8px;margin:4px 0;white-space:pre-wrap}
+pre code{padding:0}
+blockquote{margin:2px 0;padding-left:10px;border-left:3px solid #d0d7de;color:#424a53}
+.spoiler{background:#e6e8eb;border-radius:3px;padding:0 2px}
+.h1{font-size:20px;font-weight:700}.h2{font-size:17px;font-weight:700}.h3{font-size:15px;font-weight:700}
+.sub{font-size:12px;color:#59636e}
 `;
-
-export function escapeHtml(text: string): string {
-  return text.replace(/[&<>"']/g, (char) => ESCAPES[char] ?? char);
-}
 
 function utc(value: string | number): string {
   const date = new Date(value);
@@ -61,6 +68,10 @@ function utc(value: string | number): string {
 
 function href(path: string): string {
   return escapeHtml(path.split('/').map(encodeURIComponent).join('/'));
+}
+
+function messageCount(count: number): string {
+  return `${count} ${count === 1 ? 'message' : 'messages'}`;
 }
 
 function preview(text: string, length: number): string {
@@ -78,12 +89,16 @@ function person(user: APIUser, transcript: Transcript): Person {
   );
 }
 
-// Runs on already-escaped text, which is why the patterns match &lt; and &gt;.
 function formatContent(raw: string, transcript: Transcript): string {
+  return renderMarkdown(raw, (escaped) => mentions(escaped, transcript));
+}
+
+// Runs on already-escaped text, which is why the patterns match &lt; and &gt;.
+function mentions(escaped: string, transcript: Transcript): string {
   const { users, roles, channels } = transcript.resolved;
   const mention = (id: string, label: string) => `<span class="mention" title="${id}">${escapeHtml(label)}</span>`;
 
-  return escapeHtml(raw)
+  return escaped
     .replace(/&lt;@!?(\d+)&gt;/g, (_, id: string) => mention(id, `@${users[id]?.displayName ?? 'unknown user'}`))
     .replace(/&lt;@&amp;(\d+)&gt;/g, (_, id: string) => mention(id, `@${roles[id] ?? 'unknown role'}`))
     .replace(/&lt;#(\d+)&gt;/g, (_, id: string) => mention(id, `#${channels[id] ?? 'unknown channel'}`))
@@ -196,11 +211,6 @@ function extras(message: APIMessage, transcript: Transcript): string {
   });
   if (reactions.length > 0) parts.push(`<div>${reactions.join('')}</div>`);
 
-  const threadPath = transcript.threads[message.id];
-  if (threadPath) {
-    parts.push(`<div><a href="${href(threadPath)}">🧵 Thread: ${escapeHtml(message.thread?.name ?? 'open thread')}</a></div>`);
-  }
-
   return parts.join('');
 }
 
@@ -254,49 +264,69 @@ ${content}
 }
 
 export function renderTranscript(transcript: Transcript): string {
-  const { guild, category, channel, parent, messages } = transcript;
+  const { guild, category, channel, messages, threads } = transcript;
+  const total = messages.length + threads.reduce((sum, thread) => sum + thread.messages.length, 0);
   const header =
+    '<nav class="back"><a href="../_index.html">← All channels</a></nav>' +
     `<h1>#${escapeHtml(channel.name)}</h1>` +
-    `<p class="meta">${escapeHtml(guild.name)} · ${escapeHtml(category.name)} · archived ${utc(transcript.archivedAt)} · ${messages.length} messages</p>` +
-    (parent
-      ? `<p class="meta">Thread in <a href="${href(parent.path)}#msg-${parent.messageId}">#${escapeHtml(parent.name)}</a></p>`
-      : '') +
+    `<p class="meta">${escapeHtml(guild.name)} · ${escapeHtml(category.name)} · archived ${utc(transcript.archivedAt)} · ${messageCount(total)}</p>` +
     (channel.topic ? `<p class="meta">${escapeHtml(channel.topic)}</p>` : '');
 
   return page(
     `#${channel.name} — ${category.name}`,
     header,
-    messages.map((message) => renderMessage(message, transcript)).join('\n'),
+    transcript.kind === 'forum' ? forumBody(transcript) : channelBody(transcript),
   );
 }
 
-export interface ForumPost {
-  name: string;
-  path: string;
-  author: Person;
-  createdAt: string;
-  messageCount: number;
+// Each thread sits under the message that started it, as in Discord.
+function channelBody(transcript: Transcript): string {
+  const byStart = new Map(transcript.threads.flatMap((thread) => (thread.startMessageId ? [[thread.startMessageId, thread]] : [])));
+  const placed = new Set<string>();
+
+  const parts = transcript.messages.map((message) => {
+    const thread = byStart.get(message.id);
+    if (!thread) return renderMessage(message, transcript);
+    placed.add(thread.channel.id);
+    return renderMessage(message, transcript) + threadSection(thread, transcript);
+  });
+
+  const others = transcript.threads.filter((thread) => !placed.has(thread.channel.id));
+  if (others.length > 0) {
+    parts.push('<h2>Other threads</h2>', ...others.map((thread) => threadSection(thread, transcript)));
+  }
+  return parts.join('\n');
 }
 
-export function renderForumIndex(
-  forum: { name: string; guildName: string; categoryName: string; archivedAt: string },
-  posts: ForumPost[],
-): string {
-  const rows = posts
-    .map(
-      (post) =>
-        `<tr><td><a href="${href(post.path)}">${escapeHtml(post.name)}</a></td>` +
-        `<td>${escapeHtml(post.author.displayName)}</td><td>${utc(post.createdAt)}</td><td>${post.messageCount}</td></tr>`,
-    )
+function threadSection(thread: Thread, transcript: Transcript): string {
+  return (
+    `<section class="thread" id="thread-${thread.channel.id}">` +
+    `<h2>🧵 ${escapeHtml(thread.channel.name)}</h2>` +
+    `<p class="meta">${messageCount(thread.messages.length)}</p>` +
+    thread.messages.map((message) => renderMessage(message, transcript)).join('\n') +
+    '</section>'
+  );
+}
+
+// A forum has no messages of its own: a list of posts, then each post in full.
+function forumBody(transcript: Transcript): string {
+  const started = (post: Thread) => {
+    const first = post.messages[0];
+    const by = first ? escapeHtml(person(first.author, transcript).displayName) : 'unknown';
+    return `${by} · ${first ? utc(first.timestamp) : 'no messages'} · ${messageCount(post.messages.length)}`;
+  };
+
+  const list = transcript.threads
+    .map((post) => `<li><a href="#post-${post.channel.id}">${escapeHtml(post.channel.name)}</a> <span class="meta">${started(post)}</span></li>`)
     .join('');
-  const header =
-    `<h1>#${escapeHtml(forum.name)}</h1>` +
-    `<p class="meta">${escapeHtml(forum.guildName)} · ${escapeHtml(forum.categoryName)} · archived ${utc(forum.archivedAt)} · ${posts.length} posts</p>`;
-  return page(
-    `#${forum.name} — ${forum.categoryName}`,
-    header,
-    `<table><tr><th>Post</th><th>Started by</th><th>Created</th><th>Messages</th></tr>${rows}</table>`,
+  const posts = transcript.threads.map(
+    (post) =>
+      `<section class="post" id="post-${post.channel.id}">` +
+      `<h2>${escapeHtml(post.channel.name)}</h2><p class="meta">${started(post)}</p>` +
+      post.messages.map((message) => renderMessage(message, transcript)).join('\n') +
+      '</section>',
   );
+  return `<h2>${transcript.threads.length} ${transcript.threads.length === 1 ? 'post' : 'posts'}</h2><ul>${list}</ul>\n${posts.join('\n')}`;
 }
 
 export interface IndexEntry {
@@ -314,6 +344,7 @@ export function renderCategoryIndex(input: {
   archivedAt: string;
   operator: string;
   entries: IndexEntry[];
+  converted: number;
   misses: string[];
 }): string {
   const rows = input.entries
@@ -323,6 +354,10 @@ export function renderCategoryIndex(input: {
         `<td>${entry.messages}</td><td>${entry.files}</td><td>${entry.threads}</td></tr>`,
     )
     .join('');
+  const converted =
+    input.converted === 0
+      ? ''
+      : `<p class="meta">${input.converted} ${input.converted === 1 ? 'file was' : 'files were'} saved as the original upload. Discord's own record lists a converted copy with a different size.</p>`;
   const misses =
     input.misses.length === 0
       ? '<p class="meta">Every embed and sticker image was archived.</p>'
@@ -330,10 +365,10 @@ export function renderCategoryIndex(input: {
   const header =
     `<h1>${escapeHtml(input.categoryName)}</h1>` +
     `<p class="meta">${escapeHtml(input.guildName)} · category ${input.categoryId} · archived ${utc(input.archivedAt)} by ${escapeHtml(input.operator)}</p>` +
-    '<p class="meta">Verification results are in _run.json. Checksums for every file are in _manifest-sha256.txt.</p>';
+    '<p class="meta">Open a channel below. Each channel folder holds the chat page, an attachments folder and a .json file with the full data. _manifest-sha256.txt lists a checksum for every file.</p>';
   return page(
     input.categoryName,
     header,
-    `<table><tr><th>Channel</th><th>Messages</th><th>Files</th><th>Threads</th></tr>${rows}</table>${misses}`,
+    `<table><tr><th>Channel</th><th>Messages</th><th>Files</th><th>Threads / posts</th></tr>${rows}</table>${converted}${misses}`,
   );
 }
