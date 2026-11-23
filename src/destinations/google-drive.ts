@@ -3,15 +3,15 @@ import { createSend, fail, hashBody, type Send } from '../http.ts';
 import { CHUNK_SIZE, type RemoteItem, type Store } from './store.ts';
 
 // Google Drive through the Drive v3 REST API, with the drive.file permission: the tool sees only
-// files it created itself. So it makes its own top folder (decision D42).
+// files it created itself. So it makes its own top folder.
 
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const SERVICE = 'Google Drive';
 const FOLDER = 'application/vnd.google-apps.folder';
 const FIELDS = 'id,name,mimeType,size,webViewLink,sha256Checksum';
-const CHUNK_TIMEOUT_MS = 5 * 60_000;
-const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+// For one request that carries a chunk of file bytes.
+const UPLOAD_TIMEOUT_MS = 5 * 60_000;
 // Marks the top folder, so a category folder with the same name inside it can never be mistaken for it.
 const ROOT_TAG = "appProperties has { key='discordArchiveTool' and value='root' }";
 // Google reports some throttling as 403 with one of these reasons.
@@ -137,7 +137,7 @@ export function createGoogleDrive(options: GoogleDriveOptions): Store {
         method: 'PUT',
         auth: false,
         redirect: 'manual',
-        timeoutMs: CHUNK_TIMEOUT_MS,
+        timeoutMs: UPLOAD_TIMEOUT_MS,
         headers: { 'content-range': `bytes ${start}-${end}/${size}` },
         body: buffer.subarray(0, bytesRead),
       });
@@ -208,7 +208,7 @@ export function createGoogleDrive(options: GoogleDriveOptions): Store {
     },
 
     download: async (id) => {
-      const response = await send(`${API}/files/${encodeURIComponent(id)}?alt=media`, { timeoutMs: DOWNLOAD_TIMEOUT_MS });
+      const response = await send(`${API}/files/${encodeURIComponent(id)}?alt=media`);
       if (!response.ok) return fail(SERVICE, response);
       return hashBody(response);
     },

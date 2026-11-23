@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
@@ -45,7 +45,7 @@ async function archived(messageCount = 1) {
 
   const verify = () =>
     verifyArchive({ discord: fake(world), store: drive.store, state, treeDir, folderId, log: () => {} });
-  return { world, drive, treeDir, verify };
+  return { world, drive, treeDir, state, folderId, verify };
 }
 
 function failures(result: VerifyResult): Record<string, string[]> {
@@ -66,6 +66,34 @@ describe('verifyArchive', () => {
     assert.deepEqual(result.remote['case-one/attachments/image.png'], { size: 8, checksum: drive.checksum(IMAGE) });
   });
 
+  test('looks at Discord and reads files back several at a time, with the same result', async () => {
+    const { world, drive, treeDir, state, folderId, verify } = await archived();
+    // Long enough that four at once are sure to overlap, whatever else the machine is doing.
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 25));
+    const busy = { lookups: 0, mostLookups: 0, downloads: 0, mostDownloads: 0 };
+    const discord = fake(world);
+    const { messagesAfter } = discord;
+    discord.messagesAfter = async (...args) => {
+      busy.mostLookups = Math.max(busy.mostLookups, ++busy.lookups);
+      await pause();
+      busy.lookups--;
+      return messagesAfter(...args);
+    };
+    const { download } = drive.store;
+    drive.store.download = async (id) => {
+      busy.mostDownloads = Math.max(busy.mostDownloads, ++busy.downloads);
+      await pause();
+      busy.downloads--;
+      return download(id);
+    };
+
+    const slow = await verifyArchive({ discord, store: drive.store, state, treeDir, folderId, log: () => {} });
+    assert.equal(busy.mostLookups, 4);
+    assert.equal(busy.mostDownloads, 4);
+    drive.store.download = download;
+    assert.deepEqual(slow, await verify());
+  });
+
   test('fails when a message, thread or channel appears after capture', async () => {
     const { world, verify } = await archived();
     world.messages[TEXT]?.push(message('300000000000000999', TEXT, { content: 'late message' }));
@@ -80,11 +108,26 @@ describe('verifyArchive', () => {
     });
   });
 
-  test('fails when Discord counts a different number of messages in a thread', async () => {
+  test('fails when Discord counts more messages in a thread than the archive has', async () => {
     const { verify } = await archived(2);
     assert.deepEqual(failures(await verify()), {
-      'Complete capture': ['#case-one: thread "counted": Discord counts 2 messages, the archive has 1'],
+      'Complete capture': ['#case-one: thread "counted": Discord counts 2 messages, the archive has only 1'],
     });
+  });
+
+  test('passes when Discord counts fewer messages in a thread than the archive has', async () => {
+    // Seen on real threads: Discord's count ran 1 to 3 under the messages it returned.
+    const { verify } = await archived(0);
+    assert.deepEqual(failures(await verify()), {});
+  });
+
+  test('fails when a message is saved twice', async () => {
+    const { treeDir, verify } = await archived();
+    const file = join(treeDir, '_data', 'case-one.json');
+    const transcript = JSON.parse(await readFile(file, 'utf8')) as { messages: unknown[] };
+    transcript.messages.push(transcript.messages[0]);
+    await writeFile(file, JSON.stringify(transcript));
+    assert.deepEqual(failures(await verify())['Complete capture'], ['#case-one has a message saved twice']);
   });
 
   test('fails when a local file changed after capture', async () => {
@@ -108,6 +151,22 @@ describe('verifyArchive', () => {
     assert.ok(problems.some((line) => /^_data\/case-one\.json is 2 bytes in Test Drive, \d+ locally$/.test(line)));
     assert.ok(problems.includes('_index.html is missing from Test Drive'));
     assert.ok(problems.includes('case-one/notes.txt is in Test Drive but not in the archive'));
+  });
+
+  test('reads a file back again when the download fails part-way, and stops if it keeps failing', async () => {
+    const { drive, verify } = await archived();
+    const { download } = drive.store;
+    let drops = 2;
+    drive.store.download = async (id) => {
+      if (drops-- > 0) throw new Error('connection reset');
+      return download(id);
+    };
+    assert.deepEqual(failures(await verify()), {});
+
+    drive.store.download = async () => {
+      throw new Error('connection reset');
+    };
+    await assert.rejects(verify(), /connection reset/);
   });
 
   test('fails when a channel folder is gone from Test Drive', async () => {

@@ -17,7 +17,8 @@ interface Call {
   text: string | null;
 }
 
-function fakeGraph(reply: (call: Call) => Response) {
+// Tests use 4-byte chunks unless they pass `realSizes`, which leaves the tool's own sizes in place.
+function fakeGraph(reply: (call: Call) => Response, realSizes = false) {
   const calls: Call[] = [];
   const waits: number[] = [];
   const http = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -41,7 +42,7 @@ function fakeGraph(reply: (call: Call) => Response) {
     sleep: async (ms) => {
       waits.push(ms);
     },
-    chunkSize: 4,
+    ...(realSizes ? {} : { chunkSize: 4 }),
   });
   return { graph, calls, waits };
 }
@@ -139,6 +140,41 @@ describe('createOneDrive', () => {
         ['bytes 4-7/10', [5, 6, 7, 8], null],
         ['bytes 8-9/10', [9, 10], null],
       ],
+    );
+  });
+
+  test('uploads a small file in one request, with the token and no session', async () => {
+    const path = join(dir, 'small.bin');
+    await writeFile(path, new Uint8Array([1, 2, 3, 4]));
+    const { graph, calls } = fakeGraph(() => item('small', { size: 4 }));
+    const saved = await graph.upload('parent', 'a b.bin', path, 4);
+    assert.equal(saved.size, 4);
+    assert.deepEqual(
+      calls.map((call) => [call.method, call.url, call.authorization, [...(call.body ?? [])]]),
+      [['PUT', `${API}/items/parent:/a%20b.bin:/content`, 'Bearer access-token', [1, 2, 3, 4]]],
+    );
+  });
+
+  test('keeps to one request only up to 4 MiB, and uses a session above that', async () => {
+    const limit = 4 * 1024 * 1024;
+    const reply = (call: Call) => {
+      if (call.url.endsWith('/createUploadSession')) return Response.json({ uploadUrl: 'https://upload.test/session' });
+      return item('file', { size: call.body?.byteLength ?? 0 });
+    };
+
+    const atLimit = join(dir, 'at-limit.bin');
+    await writeFile(atLimit, new Uint8Array(limit));
+    const small = fakeGraph(reply, true);
+    await small.graph.upload('parent', 'at-limit.bin', atLimit, limit);
+    assert.deepEqual(small.calls.map((call) => call.method), ['PUT']);
+
+    const over = join(dir, 'over.bin');
+    await writeFile(over, new Uint8Array(limit + 1));
+    const large = fakeGraph(reply, true);
+    await large.graph.upload('parent', 'over.bin', over, limit + 1);
+    assert.deepEqual(
+      large.calls.map((call) => [call.method, call.contentRange]),
+      [['POST', null], ['PUT', `bytes 0-${limit}/${limit + 1}`]],
     );
   });
 

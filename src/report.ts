@@ -10,7 +10,6 @@ function plain(text: string): string {
   return text.replace(/[\\*_~|`>[\]]/g, (char) => `\\${char}`);
 }
 
-
 export type DeleteOutcome =
   | { status: 'deleted'; deleted: string[]; kept: string[] }
   | { status: 'kept' }
@@ -29,7 +28,7 @@ export interface RunSummary {
   outcome: DeleteOutcome;
 }
 
-function outcomeLine(outcome: DeleteOutcome): string {
+function outcomeLine(outcome: DeleteOutcome, destination: string): string {
   switch (outcome.status) {
     case 'deleted':
       return `🗑️ Deleted ${count(outcome.deleted.length, 'channel')} · the category was kept`;
@@ -38,7 +37,7 @@ function outcomeLine(outcome: DeleteOutcome): string {
     case 'stopped':
       return '⏸️ Stopped before deleting · nothing deleted';
     case 'refused':
-      return '⚠️ Not deleted · Discord or OneDrive changed after verifying (details in the terminal)';
+      return `⚠️ Not deleted · Discord or ${destination} changed after verifying (details in the terminal)`;
   }
 }
 
@@ -49,7 +48,7 @@ export function runReport(summary: RunSummary): string[] {
   return splitLines([
     `## 🗄️ ${plain(summary.categoryName)}`,
     `✅ Archived to ${summary.destination} and verified · 4 of 4 checks passed`,
-    outcomeLine(summary.outcome),
+    outcomeLine(summary.outcome, summary.destination),
     `📊 ${count(summary.channels.length, 'channel')} · ${count(summary.messages, 'message')} · ${count(summary.files, 'file')}`,
     `📁 [Open the archive in ${summary.destination}](<${summary.webUrl}>)`,
     '',

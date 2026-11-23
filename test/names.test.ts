@@ -80,21 +80,41 @@ describe('claimFolderName', () => {
 
 describe('claimFileName', () => {
   test('numbers repeats in the order they are claimed and keeps the extension', () => {
-    const taken = new Set<string>();
+    const taken = new Map<string, number>();
     assert.equal(claimFileName('image.png', taken), 'image.png');
     assert.equal(claimFileName('image.png', taken), 'image (2).png');
     assert.equal(claimFileName('IMAGE.PNG', taken), 'IMAGE (3).PNG');
   });
 
+  test('skips a number already used by a file really named that way', () => {
+    const taken = new Map<string, number>();
+    assert.equal(claimFileName('image (2).png', taken), 'image (2).png');
+    assert.equal(claimFileName('image.png', taken), 'image.png');
+    assert.equal(claimFileName('image.png', taken), 'image (3).png');
+    assert.equal(claimFileName('image (2).png', taken), 'image (2) (2).png');
+    assert.equal(claimFileName('image.png', taken), 'image (4).png');
+  });
+
+  test('stays quick when thousands of files share one name', () => {
+    const taken = new Map<string, number>();
+    const start = performance.now();
+    let last = '';
+    for (let index = 0; index < 20_000; index++) last = claimFileName('image.png', taken);
+    assert.equal(last, 'image (20000).png');
+    assert.equal(taken.size, 20_000);
+    // Counting up from 2 for every file takes minutes here; remembering the number takes milliseconds.
+    assert.ok(performance.now() - start < 5000, 'took too long');
+  });
+
   test('cleans the name and keeps unusual extensions on a clash', () => {
-    const taken = new Set<string>();
+    const taken = new Map<string, number>();
     assert.equal(claimFileName('what?.jpg', taken), 'what_.jpg');
     assert.equal(claimFileName('game.SaveReplay', taken), 'game.SaveReplay');
     assert.equal(claimFileName('game.SaveReplay', taken), 'game (2).SaveReplay');
   });
 
   test('keeps the extension when the stem is cut', () => {
-    const taken = new Set<string>();
+    const taken = new Map<string, number>();
     const name = claimFileName(`${'a'.repeat(200)}.png`, taken);
     assert.ok(name.endsWith('.png'));
     assert.ok(name.length <= 80);
@@ -103,7 +123,7 @@ describe('claimFileName', () => {
 
 describe('names from Discord can never leave the archive folder', () => {
   test('turns path tricks and broken extensions into plain, valid names', () => {
-    const taken = new Set<string>();
+    const taken = new Map<string, number>();
     const names = ['../../secrets.txt', '..', '.', 'C:\\Windows\\evil.dll', 'trailing.', 'photo.png ', 'x.<script>', '.env'].map((raw) =>
       claimFileName(raw, taken),
     );

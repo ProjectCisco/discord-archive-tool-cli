@@ -5,7 +5,6 @@ import { dirname, join, relative, sep } from 'node:path';
 import { MANIFEST_PATH } from './layout.ts';
 import { writeFileAtomic } from './state.ts';
 
-
 export interface ManifestEntry {
   path: string;
   sha256: string;

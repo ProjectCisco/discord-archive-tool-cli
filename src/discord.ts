@@ -1,6 +1,7 @@
 import { DiscordAPIError, REST } from '@discordjs/rest';
 import { Routes } from 'discord-api-types/v10';
 import type { APIGuildMember, APIMessage, APIRole } from 'discord-api-types/v10';
+import { fetchWithin } from './http.ts';
 
 // The channel fields this tool reads. The full object is kept as-is in the channel's .json file.
 export interface GuildChannel {
@@ -23,7 +24,9 @@ export interface Download {
   encoded: boolean;
 }
 
-const DOWNLOAD_TIMEOUT_MS = 120_000;
+// How long Discord's file servers may take to start sending a file. The download itself is not
+// timed: a large attachment on a slow line must not be cut off.
+const DOWNLOAD_START_MS = 60_000;
 
 // Files are only fetched from Discord's own servers. An embed can point anywhere, including
 // addresses inside your own network, so anything else is never requested.
@@ -53,6 +56,9 @@ export function createDiscord(token: string) {
   };
 
   return {
+    // The bot's own application. Its flags say whether Message Content Intent is on.
+    application: async () => (await get(Routes.currentApplication())) as { flags?: number },
+
     channel: async (id: string) => (await get(Routes.channel(id))) as GuildChannel,
 
     guild: async (id: string) => (await get(Routes.guild(id))) as { id: string; name: string },
@@ -99,7 +105,7 @@ export function createDiscord(token: string) {
     // Attachment URLs are signed and expire, so they are never logged.
     download: async (url: string): Promise<Download> => {
       if (!isDiscordMedia(url)) throw new Error('not hosted by Discord, so not downloaded');
-      const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+      const response = await fetchWithin(DOWNLOAD_START_MS, fetch, url);
       if (!isDiscordMedia(response.url)) {
         await response.body?.cancel();
         throw new Error('redirected away from Discord, so not downloaded');
