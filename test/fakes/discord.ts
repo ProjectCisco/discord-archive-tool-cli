@@ -55,6 +55,10 @@ export interface FakeServer {
   calls: string[];
   // Channel IDs the bot isn't allowed to delete.
   protected?: string[];
+  // The bot application's flags. Defaults to Message Content Intent on (fewer than 100 servers).
+  appFlags?: number;
+  // Archived threads per page. Discord sends up to 100; the default of 2 keeps pages small.
+  threadPageSize?: number;
 }
 
 export function server(): FakeServer {
@@ -145,18 +149,27 @@ export function fake(world: FakeServer): Discord {
       if (!found) throw new Error(`unknown channel ${id}`);
       return found;
     },
+    application: async () => ({ flags: world.appFlags ?? 1 << 19 }),
     guild: async (id) => ({ id, name: 'Example Server' }),
     guildChannels: async () => world.channels,
     roles: async () => [{ id: '500000000000000001', name: 'Moderators' }] as Awaited<ReturnType<Discord['roles']>>,
     activeThreads: async () => world.activeThreads,
+    // As Discord does: newest archived first, only those archived strictly before `before`.
     archivedThreads: async (channelId, kind, before) => {
-      const pages = world.archived[channelId]?.[kind] ?? [];
-      const index = before === undefined ? 0 : Number(before.replace('page-', ''));
-      const threads = (pages[index] ?? []).map((thread) => ({
-        ...thread,
-        thread_metadata: { archive_timestamp: `page-${index + 1}` },
-      }));
-      return { threads, has_more: index + 1 < pages.length };
+      world.calls.push(`archived ${kind} ${channelId}`);
+      // A paging loop that never ends fails here instead of hanging the tests.
+      if (world.calls.filter((call) => call === `archived ${kind} ${channelId}`).length > 50) throw new Error('fake: too many pages');
+      const time = (thread: GuildChannel) => Date.parse(thread.thread_metadata?.archive_timestamp ?? '');
+      const older = (world.archived[channelId]?.[kind] ?? [])
+        .flat()
+        .map((thread, index) => ({
+          thread_metadata: { archive_timestamp: new Date(Date.UTC(2026, 9, 30) - index * 60_000).toISOString() },
+          ...thread,
+        }))
+        .filter((thread) => before === undefined || time(thread) < Date.parse(before))
+        .sort((a, b) => time(b) - time(a));
+      const size = world.threadPageSize ?? 2;
+      return { threads: older.slice(0, size), has_more: older.length > size };
     },
     messagesAfter: async (channelId, after) => {
       world.calls.push(`messages ${channelId} after ${after}`);

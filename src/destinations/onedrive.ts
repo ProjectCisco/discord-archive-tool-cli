@@ -1,4 +1,4 @@
-import { open } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import { createSend, fail, hashBody, orNull, type Send } from '../http.ts';
 import { CHUNK_SIZE, type RemoteItem, type Store } from './store.ts';
 
@@ -8,8 +8,11 @@ import { CHUNK_SIZE, type RemoteItem, type Store } from './store.ts';
 const API = 'https://graph.microsoft.com/v1.0/me/drive';
 const SERVICE = 'Microsoft Graph';
 const FIELDS = 'id,name,size,webUrl,folder,file';
-const CHUNK_TIMEOUT_MS = 5 * 60_000;
-const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+// For one request that carries file bytes: a small file, or one chunk of a big one.
+const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+// Up to this size a file goes up in one request, which halves the requests for a typical archive.
+// Microsoft's pages give 4 MB and 250 MB as the limit for that; this keeps to the lower one.
+const SINGLE_REQUEST_MAX = 4 * 1024 * 1024;
 
 interface DriveItem {
   id: string;
@@ -43,6 +46,8 @@ function toItem(item: DriveItem): RemoteItem {
 export function createOneDrive(options: OneDriveOptions): Store {
   const send: Send = createSend({ service: SERVICE, token: options.token, fetch: options.fetch, sleep: options.sleep });
   const chunkSize = options.chunkSize ?? CHUNK_SIZE;
+  // What counts as a small file: never more than one chunk.
+  const singleRequestMax = Math.min(chunkSize, SINGLE_REQUEST_MAX);
 
   const json = async <T>(url: string, init: { method?: string; body?: string } = {}): Promise<T> => {
     const response = await send(url, { ...init, headers: init.body ? { 'content-type': 'application/json' } : {} });
@@ -54,10 +59,10 @@ export function createOneDrive(options: OneDriveOptions): Store {
   const itemUrl = (id: string) => `${API}/items/${encodeURIComponent(id)}`;
   const childUrl = (parentId: string, name: string) => `${itemUrl(parentId)}:/${encodeURIComponent(name)}:`;
 
-  // A plain PUT replaces any file of that name. Used for small files and empty ones, which an
-  // upload session can't take.
+  // A plain PUT replaces any file of that name. Used for small files, including empty ones, which
+  // an upload session can't take.
   const put = async (parentId: string, name: string, body: Uint8Array) => {
-    const response = await send(`${childUrl(parentId, name)}/content`, { method: 'PUT', body });
+    const response = await send(`${childUrl(parentId, name)}/content`, { method: 'PUT', body, timeoutMs: UPLOAD_TIMEOUT_MS });
     if (!response.ok) return fail(SERVICE, response);
     return toItem((await response.json()) as DriveItem);
   };
@@ -117,7 +122,7 @@ export function createOneDrive(options: OneDriveOptions): Store {
     writeText: (parentId, name, text) => put(parentId, name, new TextEncoder().encode(text)),
 
     upload: async (parentId, name, localPath, size) => {
-      if (size === 0) return put(parentId, name, new Uint8Array());
+      if (size <= singleRequestMax) return put(parentId, name, await readFile(localPath));
       const session = await json<{ uploadUrl: string }>(`${childUrl(parentId, name)}/createUploadSession`, {
         method: 'POST',
         body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } }),
@@ -133,7 +138,7 @@ export function createOneDrive(options: OneDriveOptions): Store {
           const response = await send(session.uploadUrl, {
             method: 'PUT',
             auth: false,
-            timeoutMs: CHUNK_TIMEOUT_MS,
+            timeoutMs: UPLOAD_TIMEOUT_MS,
             headers: { 'content-range': `bytes ${start}-${end}/${size}` },
             body: buffer.subarray(0, bytesRead),
           });
@@ -149,7 +154,7 @@ export function createOneDrive(options: OneDriveOptions): Store {
     },
 
     download: async (id) => {
-      const response = await send(`${itemUrl(id)}/content`, { timeoutMs: DOWNLOAD_TIMEOUT_MS });
+      const response = await send(`${itemUrl(id)}/content`);
       if (!response.ok) return fail(SERVICE, response);
       return hashBody(response);
     },

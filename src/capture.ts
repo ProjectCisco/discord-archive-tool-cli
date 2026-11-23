@@ -1,15 +1,17 @@
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, rename, rm } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { ChannelType, MessageReferenceType, MessageType, StickerFormatType } from 'discord-api-types/v10';
 import type { APIAttachment, APIMessage, APIUser } from 'discord-api-types/v10';
+import { componentContent } from './components.ts';
 import type { Discord, Download, GuildChannel } from './discord.ts';
 import { explain } from './errors.ts';
 import { DATA_DIR, INDEX_NAME, transcriptPath } from './layout.ts';
 import { writeManifest } from './manifest.ts';
 import { claimFileName, claimFolderName, safeName } from './names.ts';
+import { mapParallel } from './parallel.ts';
 import { renderCategoryIndex, renderTranscript } from './render.ts';
 import { STATE_SCHEMA, readState, writeFileAtomic, writeState, type CapturedChannel, type RunState } from './state.ts';
 import { count } from './text.ts';
@@ -22,9 +24,12 @@ const MESSAGE_CHANNELS = new Set<number>([
   ChannelType.GuildStageVoice,
 ]);
 const THREAD_PARENTS = new Set<number>([ChannelType.GuildText, ChannelType.GuildAnnouncement]);
+// The bot's Message Content Intent, as the flag Discord sets for apps in 100+ servers or in fewer.
+// Without it, Discord sends every message with empty text and no error.
+const MESSAGE_CONTENT_FLAGS = (1 << 18) | (1 << 19);
 const FORUM_CHANNELS = new Set<number>([ChannelType.GuildForum, ChannelType.GuildMedia]);
 // Ceilings that stop a bad or hostile server filling the disk. Discord's largest upload is 500 MiB;
-// a served original can be bigger than Discord's record (decision D32), hence the headroom.
+// a served original can be bigger than Discord's record (see isConvertedCopy), hence the headroom.
 const MAX_ATTACHMENT_BYTES = 1024 ** 3;
 const MAX_BEST_EFFORT_BYTES = 50 * 1024 ** 2;
 
@@ -60,9 +65,18 @@ interface Context {
 // Everything saved for one top-level channel goes in its single attachments folder.
 interface Files {
   dir: string;
-  taken: Set<string>;
-  saved: Record<string, ArchivedFile>;
-  misses: string[];
+  // See claimFileName.
+  taken: Map<string, number>;
+}
+
+// One file to download.
+interface FileJob {
+  // Where the file is recorded in the transcript's `files`.
+  key: string;
+  // Best-effort files only: what _index.html lists if the file can't be saved. Without a label,
+  // a failure stops the run, so nothing is deleted.
+  label?: string;
+  save: () => Promise<ArchivedFile>;
 }
 
 export async function captureCategory(options: CaptureOptions): Promise<CaptureResult> {
@@ -71,6 +85,12 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
   const category = await discord.channel(categoryId);
   if (category.type !== ChannelType.GuildCategory || !category.guild_id) {
     throw new Error(`${categoryId} is not a server category`);
+  }
+  const application = await discord.application();
+  if (((application.flags ?? 0) & MESSAGE_CONTENT_FLAGS) === 0) {
+    throw new Error(
+      "The bot's Message Content Intent is off, so Discord would send every message without its text. Turn it on in the Developer Portal (your app → Bot → Message Content Intent) and run again.",
+    );
   }
   const guild = await discord.guild(category.guild_id);
   const allChannels = await discord.guildChannels(guild.id);
@@ -89,6 +109,8 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
   if (existing && existing.categoryId !== category.id) {
     throw new Error(`${runDir} belongs to category ${existing.categoryId}, not ${category.id}`);
   }
+  // A verified copy is final: changing it would make it differ from what was checked.
+  if (existing?.verification?.status === 'verified') throw new Error(`${runDir} is already archived and verified`);
   const state: RunState = existing ?? {
     schema: STATE_SCHEMA,
     guildId: guild.id,
@@ -119,6 +141,9 @@ export async function captureCategory(options: CaptureOptions): Promise<CaptureR
     const progress = `[${index + 1}/${children.length}] #${channel.name}`;
     const done = state.channels[channel.id];
     if (done) {
+      // Rebuilt from the saved record, so the page always shows everything the record holds.
+      const transcript = JSON.parse(await readFile(join(treeDir, transcriptPath(done.folder)), 'utf8')) as Transcript;
+      await writeFileAtomic(join(treeDir, done.folder, `${done.folder}.html`), renderTranscript(transcript));
       log(`${progress}: already captured`);
       continue;
     }
@@ -177,16 +202,20 @@ async function captureChannel(
   for (const thread of threadChannels) context.channelNames[thread.id] = thread.name;
 
   await mkdir(dir, { recursive: true });
-  const files: Files = { dir, taken: new Set(), saved: {}, misses: [] };
-  const messages = isForum ? [] : await captureMessages(context, channel, files);
+  const files: Files = { dir, taken: new Map() };
+  const jobs: FileJob[] = [];
+  const read = async (source: GuildChannel) => {
+    const messages = await readMessages(context.discord, source.id);
+    for (const message of messages) jobs.push(...fileJobs(context, source, message, files));
+    return messages;
+  };
 
+  const messages = isForum ? [] : await read(channel);
   const threads: Thread[] = [];
   for (const thread of threadChannels) {
-    threads.push({
-      ...conversation(thread, await captureMessages(context, thread, files)),
-      startMessageId: isForum ? null : startMessage(thread, messages),
-    });
+    threads.push({ ...conversation(thread, await read(thread)), startMessageId: isForum ? null : startMessage(thread, messages) });
   }
+  const { saved, misses } = await saveFiles(jobs);
 
   const everything = [...messages, ...threads.flatMap((thread) => thread.messages)];
   const transcript: Transcript = {
@@ -203,23 +232,23 @@ async function captureChannel(
       channels: context.channelNames,
       forwardAuthors: await forwardAuthors(context, everything),
     },
-    files: files.saved,
+    files: saved,
   };
   await writeFileAtomic(join(context.treeDir, transcriptPath(folder)), JSON.stringify(transcript, null, 2));
   await writeFileAtomic(join(dir, `${folder}.html`), renderTranscript(transcript));
 
-  const saved = Object.values(files.saved);
+  const archived = Object.values(saved);
   return {
     folder,
     entry: {
       name: channel.name,
       path: `${folder}/${folder}.html`,
       messages: everything.length,
-      files: saved.filter((file) => file.required).length,
+      files: archived.filter((file) => file.required).length,
       threads: threads.length,
     },
-    converted: saved.filter((file) => file.declaredSize !== undefined).length,
-    misses: files.misses,
+    converted: archived.filter((file) => file.declaredSize !== undefined).length,
+    misses,
   };
 }
 
@@ -238,17 +267,14 @@ function startMessage(thread: GuildChannel, parentMessages: APIMessage[]): strin
   return start?.id ?? null;
 }
 
-async function captureMessages(context: Context, channel: GuildChannel, files: Files): Promise<APIMessage[]> {
+async function readMessages(discord: Discord, channelId: string): Promise<APIMessage[]> {
   const messages: APIMessage[] = [];
   // Page forward from the very first message. Only an empty page ends the loop: no silent truncation.
   for (let after = '0'; ; ) {
-    const page = (await context.discord.messagesAfter(channel.id, after)).sort(byId);
+    const page = (await discord.messagesAfter(channelId, after)).sort(byId);
     const last = page.at(-1);
     if (!last) return messages;
-    for (const message of page) {
-      await saveFiles(context, channel, message, files);
-      messages.push(message);
-    }
+    messages.push(...page);
     after = last.id;
   }
 }
@@ -277,11 +303,21 @@ async function forwardAuthors(context: Context, messages: APIMessage[]): Promise
   return authors;
 }
 
-async function saveFiles(context: Context, channel: GuildChannel, message: APIMessage, files: Files): Promise<void> {
+// Every file one message needs. Names are claimed here, in message order, so a file's name never
+// depends on which download finishes first.
+function fileJobs(context: Context, channel: GuildChannel, message: APIMessage, files: Files): FileJob[] {
+  const jobs: FileJob[] = [];
+  const claim = (name: string) => `attachments/${claimFileName(name, files.taken)}`;
+  const bestEffort = (key: string, label: string, url: string, name: string) => {
+    const path = claim(name);
+    const save = async () => ({ path, ...(await download(context.discord, url, join(files.dir, path), null)), required: false });
+    jobs.push({ key, label, save });
+  };
+
   const snapshot = message.message_snapshots?.[0]?.message;
   for (const attachment of [...message.attachments, ...(snapshot?.attachments ?? [])]) {
-    const path = `attachments/${claimFileName(attachment.filename, files.taken)}`;
-    files.saved[attachment.id] = await saveAttachment(context, channel, message.id, attachment, join(files.dir, path), path);
+    const path = claim(attachment.filename);
+    jobs.push({ key: attachment.id, save: () => saveAttachment(context, channel, message.id, attachment, join(files.dir, path), path) });
   }
 
   const embedSets = [
@@ -294,24 +330,48 @@ async function saveFiles(context: Context, channel: GuildChannel, message: APIMe
       const url = media?.proxy_url ?? media?.url;
       if (!url) continue;
       const label = `embed image in message ${message.id} in #${channel.name}`;
-      const saved = await saveBestEffort(context, url, files, `embed-${index + 1}${imageExtension(url)}`);
-      if (typeof saved === 'string') files.misses.push(`${label} (${saved})`);
-      else files.saved[fileKey.embed(prefix, index)] = saved;
+      bestEffort(fileKey.embed(prefix, index), label, url, `embed-${index + 1}${imageExtension(url)}`);
     }
   }
 
   for (const sticker of message.sticker_items ?? []) {
+    const key = fileKey.sticker(sticker.id);
     const label = `sticker "${sticker.name}" in message ${message.id} in #${channel.name}`;
     if (sticker.format_type === StickerFormatType.Lottie) {
-      files.misses.push(`${label} (animated sticker format, can't be saved as an image)`);
+      jobs.push({ key, label, save: () => Promise.reject(new Error("animated sticker format, can't be saved as an image")) });
       continue;
     }
     const extension = sticker.format_type === StickerFormatType.GIF ? '.gif' : '.png';
-    const url = `https://media.discordapp.net/stickers/${sticker.id}${extension}`;
-    const saved = await saveBestEffort(context, url, files, `sticker-${safeName(sticker.name)}${extension}`);
-    if (typeof saved === 'string') files.misses.push(`${label} (${saved})`);
-    else files.saved[fileKey.sticker(sticker.id)] = saved;
+    bestEffort(key, label, `https://media.discordapp.net/stickers/${sticker.id}${extension}`, `sticker-${safeName(sticker.name)}${extension}`);
   }
+
+  for (const [index, media] of componentContent(message).media.entries()) {
+    const url = media.proxy_url ?? media.url;
+    const label = `image in message ${message.id} in #${channel.name}`;
+    bestEffort(fileKey.media(message.id, index), label, url, `image-${index + 1}${imageExtension(url)}`);
+  }
+  return jobs;
+}
+
+// Downloads a channel's files, several at a time. A best-effort file that can't be saved becomes a
+// line for _index.html, never a silent gap; any other failure is thrown.
+async function saveFiles(jobs: FileJob[]): Promise<{ saved: Record<string, ArchivedFile>; misses: string[] }> {
+  const outcomes = await mapParallel(jobs, async ({ key, label, save }) => {
+    try {
+      return { key, file: await save() };
+    } catch (error) {
+      if (label === undefined) throw error;
+      return { miss: `${label} (${explain(error)})` };
+    }
+  });
+
+  const saved: Record<string, ArchivedFile> = {};
+  const misses: string[] = [];
+  for (const outcome of outcomes) {
+    if ('miss' in outcome) misses.push(outcome.miss);
+    else saved[outcome.key] = outcome.file;
+  }
+  return { saved, misses };
 }
 
 // Required: a file that can't be downloaded at Discord's stated size stops the run, so nothing is deleted.
@@ -346,17 +406,6 @@ async function saveAttachment(
         `Couldn't download "${attachment.filename}" from message ${messageId} in #${channel.name}: ${explain(error)}`,
       );
     }
-  }
-}
-
-// Returns why, when the file couldn't be saved. A miss is listed in _index.html, never silent.
-async function saveBestEffort(context: Context, url: string, files: Files, name: string): Promise<ArchivedFile | string> {
-  const path = `attachments/${claimFileName(name, files.taken)}`;
-  try {
-    const saved = await download(context.discord, url, join(files.dir, path), null);
-    return { path, size: saved.size, sha256: saved.sha256, required: false };
-  } catch (error) {
-    return explain(error);
   }
 }
 
@@ -423,20 +472,31 @@ export async function listThreads(discord: Discord, channel: GuildChannel, activ
   return dedupe([
     ...activeThreads.filter((thread) => thread.parent_id === channel.id),
     ...(await archivedThreads(discord, channel.id, 'public')),
-    // Forum posts are always public.
-    ...(isForum ? [] : await archivedThreads(discord, channel.id, 'private')),
+    // Only text channels have private threads. Forum posts and announcement threads are always public.
+    ...(channel.type === ChannelType.GuildText ? await archivedThreads(discord, channel.id, 'private') : []),
   ]);
 }
 
 async function archivedThreads(discord: Discord, channelId: string, kind: 'public' | 'private'): Promise<GuildChannel[]> {
-  const threads: GuildChannel[] = [];
+  const threads = new Map<string, GuildChannel>();
   for (let before: string | undefined; ; ) {
     const page = await discord.archivedThreads(channelId, kind, before);
-    threads.push(...page.threads);
-    if (!page.has_more) return threads;
-    before = page.threads.at(-1)?.thread_metadata?.archive_timestamp;
+    const added = page.threads.filter((thread) => !threads.has(thread.id)).length;
+    for (const thread of page.threads) threads.set(thread.id, thread);
+    if (!page.has_more) return [...threads.values()];
+    before = justAfterOldest(page.threads);
     if (!before) throw new Error(`Discord reported more archived threads in ${channelId} but gave no point to continue from`);
+    if (added === 0) throw new Error(`Discord kept sending the same archived threads in ${channelId}, so the rest can't be reached`);
   }
+}
+
+// Discord pages archived threads by archive time, returning those archived before the time given.
+// Threads archived in the same moment as the page's oldest could fall between pages, so the next
+// page starts just after it; threads seen twice are kept once.
+function justAfterOldest(threads: GuildChannel[]): string | undefined {
+  const times = threads.map((thread) => Date.parse(thread.thread_metadata?.archive_timestamp ?? ''));
+  if (times.length === 0 || times.some(Number.isNaN)) return undefined;
+  return new Date(Math.min(...times) + 1).toISOString();
 }
 
 async function person(context: Context, user: APIUser): Promise<Person> {
@@ -459,6 +519,7 @@ function byId(a: { id: string }, b: { id: string }): number {
 }
 
 function imageExtension(url: string): string {
-  const extension = extname(new URL(url).pathname).toLowerCase();
+  // URL.parse returns null for a malformed URL; the download then refuses it and records a miss.
+  const extension = extname(URL.parse(url)?.pathname ?? '').toLowerCase();
   return /^\.(png|jpe?g|gif|webp|avif)$/.test(extension) ? extension : '.png';
 }

@@ -46,6 +46,12 @@ describe('runReport', () => {
     assert.equal(line('stopped'), '⏸️ Stopped before deleting · nothing deleted');
     assert.match(line('refused') ?? '', /^⚠️ Not deleted · Discord or OneDrive changed after verifying/);
   });
+
+  test('names the destination that was used, not always OneDrive', () => {
+    const post = runReport({ ...summary, destination: 'Google Drive', outcome: { status: 'refused' } })[0] ?? '';
+    assert.match(post, /Not deleted · Discord or Google Drive changed after verifying/);
+    assert.doesNotMatch(post, /OneDrive/);
+  });
 });
 
 describe('splitLines', () => {

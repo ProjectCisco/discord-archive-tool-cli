@@ -48,15 +48,24 @@ export function claimFolderName(raw: string, id: string, taken: Set<string>): st
   return name;
 }
 
-export function claimFileName(raw: string, taken: Set<string>): string {
+// `taken` maps every name in the folder, lower-cased, to the number the next file asking for that
+// name would get. Remembering it keeps this quick when thousands of files share one name, as
+// pasted screenshots do ("image.png"): without it each would count up from 2 again.
+export function claimFileName(raw: string, taken: Map<string, number>): string {
   const { stem: rawStem, extension } = splitExtension(raw.normalize('NFC'));
   const stem = clean(rawStem, MAX_LENGTH - extension.length);
 
-  let name = `${stem}${extension}`;
-  for (let copy = 2; taken.has(name.toLowerCase()); copy += 1) {
-    const suffix = ` (${copy})`;
-    name = `${clean(stem, MAX_LENGTH - extension.length - suffix.length)}${suffix}${extension}`;
+  const wanted = `${stem}${extension}`;
+  let name = wanted;
+  let copy = taken.get(wanted.toLowerCase());
+  if (copy !== undefined) {
+    do {
+      const suffix = ` (${copy})`;
+      name = `${clean(stem, MAX_LENGTH - extension.length - suffix.length)}${suffix}${extension}`;
+      copy += 1;
+    } while (taken.has(name.toLowerCase()));
+    taken.set(wanted.toLowerCase(), copy);
   }
-  taken.add(name.toLowerCase());
+  taken.set(name.toLowerCase(), 2);
   return name;
 }

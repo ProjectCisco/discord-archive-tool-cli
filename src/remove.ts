@@ -2,13 +2,14 @@ import { join } from 'node:path';
 import { readRunRecord, walk } from './archive-folder.ts';
 import type { Store } from './destinations/store.ts';
 import type { Discord } from './discord.ts';
+import { withRetries } from './http.ts';
 import { RUN_RECORD_PATH } from './layout.ts';
 import { sha256File } from './manifest.ts';
 import type { RunState } from './state.ts';
 import { checkCapture, readTranscripts } from './verify.ts';
 
-// The delete command's safety net (design section 7). Deleting can't be undone, so everything
-// verify proved is proved again, minutes before, and any doubt means nothing is deleted.
+// The delete command's safety net. Deleting can't be undone, so everything verify proved is
+// proved again, minutes before, and any doubt means nothing is deleted.
 
 export interface RecheckOptions {
   discord: Discord;
@@ -60,7 +61,7 @@ export async function recheck(options: RecheckOptions): Promise<string[]> {
 }
 
 async function sameAsLocal(store: Store, id: string, localPath: string): Promise<boolean> {
-  const [back, local] = await Promise.all([store.download(id), sha256File(localPath)]);
+  const [back, local] = await Promise.all([withRetries(() => store.download(id)), sha256File(localPath)]);
   return back.sha256 === local;
 }
 
@@ -94,8 +95,8 @@ export interface DeleteResult {
 }
 
 // One channel at a time. A channel moved out of the category since the archive is left alone:
-// moving it out is how someone keeps a channel (decision D7). Any error stops the run, and
-// running delete again carries on from the next channel.
+// moving it out is how someone keeps a channel. Any error stops the run, and running delete
+// again carries on from the next channel.
 export async function deleteChannels(options: DeleteOptions): Promise<DeleteResult> {
   const { discord, state, log } = options;
   state.deletion ??= { startedAt: new Date().toISOString(), deleted: {} };

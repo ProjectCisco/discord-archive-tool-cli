@@ -53,7 +53,7 @@ Each chat page shows who said what and when (in UTC), replies, forwards, edits, 
 ## Requirements
 
 - **Node.js 24.22.3** or a later 24.x release. `npm install` refuses other versions.
-- **Your own Discord application** (bot), added to your server, with **Message Content Intent** turned on in the Developer Portal.
+- **Your own Discord application** (bot), added to your server, with **Message Content Intent** turned on in the Developer Portal. Without it Discord sends every message with its text left out, so the tool checks and stops before saving anything if it is off.
 - For OneDrive: a **Microsoft Entra app registration** with *Allow public client flows* turned on and the delegated `Files.ReadWrite` permission.
 - For Google Drive: a **Google Cloud project** with the **Google Drive API** turned on and an **OAuth client ID** of type *TVs and Limited Input devices*. The tool asks only for the `drive.file` permission: it can see and change only the files it creates, nothing else in your Drive.
 
@@ -81,7 +81,7 @@ npm start -- archive <categoryId> --to google-drive
 
 It shows a code to sign in with first. It checks the destination folder can be used, then captures, uploads to `<root>/<category name>/`, and verifies:
 
-1. **Complete capture**: no channel, thread, post or message appeared in Discord since capture, and Discord's message count for each thread matches.
+1. **Complete capture**: no channel, thread, post or message appeared in Discord since capture, no message is saved twice, and no thread holds fewer messages than Discord counts.
 2. **Files downloaded**: every local file matches the manifest, and every attachment is the size Discord reported.
 3. **Upload intact**: every file is downloaded back and matches its SHA-256 checksum, and the folder holds nothing extra.
 4. **Folders reachable**: the archive folder and every channel folder have an address you can open.
@@ -92,9 +92,10 @@ If all four pass, `_data/_run.json` in the archive folder is set to `verified`, 
 - **Google Drive:** the tool can only see folders it made itself, so on the first run it creates `GOOGLE_DRIVE_ROOT` in your My Drive. Move or share that folder as you like; the tool still finds it. A folder you made yourself with the same name is invisible to it.
 - The tool only writes into a folder it created itself for this same category (it leaves `_data/_run.json` there to tell). It refuses a folder with the same name made by anyone else, or for a different category, and it never changes an archive that is already verified.
 - If it stops part-way, run the same command again. Files already uploaded are skipped.
+- Files are downloaded, uploaded and read back four at a time. If Microsoft or Google asks the tool to slow down, it waits as long as they say and carries on.
 - Browser previews in OneDrive and Google Drive can't follow links between pages or show images. Download the folder, or use the sync app, to browse an archive.
 
-Each file attached to a message must download at exactly the size Discord reports, or the capture stops. Images shown in link previews and stickers are saved when possible; any that can't be saved are listed in `_index.html`.
+Each file attached to a message must download at exactly the size Discord reports, or the capture stops. Stickers and the images in link previews and bot messages are saved when possible; any that can't be saved are listed in `_index.html`.
 
 ### Deleting the channels
 

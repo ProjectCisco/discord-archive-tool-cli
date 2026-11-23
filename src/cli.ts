@@ -119,7 +119,9 @@ async function archive(config: Config, destination: Destination, categoryId: str
       log(`\n✗ ${item.name}`);
       for (const problem of item.problems) log(`  - ${problem}`);
     }
-    throw new Error(`Verification failed, so nothing was deleted. If Discord changed since capture, delete ${runDir} and run archive again.`);
+    throw new Error(
+      `Verification failed, so nothing was deleted. If a problem above says Discord changed after capture, delete ${runDir} and run archive again. For any other problem, keep that folder and report it.`,
+    );
   }
 
   await writeRunRecord(store, folderId, state, 'verified', verified.checks.map(({ name, passed }) => ({ name, passed })));
@@ -209,7 +211,7 @@ async function deleteStage({ config, runDir, state, discord, store, dryRun, chec
     return null;
   }
 
-  // No typing (decision D40), but a last chance to stop after seeing the list.
+  // Nothing to type, but a last chance to stop after seeing the list.
   log('');
   if (!(await countdown(COUNTDOWN_SECONDS, (text) => process.stdout.write(text)))) {
     log('Stopped. Nothing was deleted. Run delete later to remove them.');

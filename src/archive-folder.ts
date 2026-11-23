@@ -2,15 +2,15 @@ import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Destination } from './config.ts';
 import type { RemoteItem, Store } from './destinations/store.ts';
+import { withRetries } from './http.ts';
 import { DATA_DIR, INDEX_NAME, MANIFEST_PATH, RUN_RECORD_NAME } from './layout.ts';
 import { parseManifest, sha256File } from './manifest.ts';
 import { safeName } from './names.ts';
+import { mapParallel } from './parallel.ts';
 import type { RunState } from './state.ts';
 
-// The archive folder at a destination: which one may be used (decision D4), what goes in it and in
-// what order, and resuming. The same for every destination.
-
-const MAX_FILE_ATTEMPTS = 3;
+// The archive folder at a destination: which one may be used, what goes in it and in what order,
+// and resuming. The same for every destination.
 
 // Identifies a folder as one this tool made, for one category.
 export interface RunRecord {
@@ -42,7 +42,7 @@ export interface UploadOptions {
   destination: Destination;
   treeDir: string;
   state: RunState;
-  // Called after every uploaded file, so a crash loses at most the file in flight.
+  // Called after every uploaded file, so a crash loses at most the files in flight.
   save: () => Promise<void>;
   log: (line: string) => void;
 }
@@ -58,27 +58,38 @@ export async function uploadArchive(options: UploadOptions) {
 
   const checksums = parseManifest(await readFile(join(treeDir, MANIFEST_PATH), 'utf8'));
   checksums.set(MANIFEST_PATH, await sha256File(join(treeDir, MANIFEST_PATH)));
-  // The index and manifest go last, so an archive that has them is one whose files all arrived.
-  const last = [INDEX_NAME, MANIFEST_PATH];
-  const order = [...[...checksums.keys()].filter((path) => !last.includes(path)).sort(), ...last.filter((path) => checksums.has(path))];
+  const pending = [...checksums.keys()].filter((path) => done[path] !== checksums.get(path)).sort();
+  const folders = await ensureFolders(store, folder.id, pending);
 
-  const folders = new Map<string, string>([['', folder.id]]);
-  let uploaded = 0;
-  for (const [index, path] of order.entries()) {
+  // Uploads finish in any order, so their saves queue up: one writes the state file at a time.
+  let saved = Promise.resolve();
+  let sent = checksums.size - pending.length;
+  const send = async (path: string) => {
     const sha256 = checksums.get(path);
-    if (!sha256 || done[path] === sha256) continue;
-    const slash = path.lastIndexOf('/');
-    const parentId = await ensureFolders(store, folders, slash === -1 ? '' : path.slice(0, slash));
+    const parentId = folders.get(parentOf(path));
+    if (!sha256 || !parentId) throw new Error(`${path} has no checksum or no folder to go in`);
+    const name = path.slice(path.lastIndexOf('/') + 1);
     const local = join(treeDir, path);
-    await uploadWithRetries(store, parentId, path.slice(slash + 1), local, (await stat(local)).size);
+    const { size } = await stat(local);
+    await withRetries(async () => {
+      const item = await store.upload(parentId, name, local, size);
+      if (item.size !== undefined && item.size !== size) {
+        throw new Error(`${store.label} stored ${item.size} bytes for ${name}, expected ${size}`);
+      }
+    });
     done[path] = sha256;
-    await options.save();
-    uploaded++;
-    log(`[${index + 1}/${order.length}] ${path}`);
-  }
+    await (saved = saved.then(options.save));
+    log(`[${++sent}/${checksums.size}] ${path}`);
+  };
+
+  // The index and manifest go last, one after the other, so an archive that has them is one whose
+  // files all arrived.
+  const last = [INDEX_NAME, MANIFEST_PATH];
+  await mapParallel(pending.filter((path) => !last.includes(path)), send);
+  for (const path of last.filter((path) => pending.includes(path))) await send(path);
 
   await writeRunRecord(store, folder.id, state, 'uploaded');
-  return { folderName, webUrl: folder.webUrl, uploaded, skipped: order.length - uploaded };
+  return { folderName, webUrl: folder.webUrl, uploaded: pending.length, skipped: checksums.size - pending.length };
 }
 
 async function openFolder(store: Store, root: RemoteItem, name: string, state: RunState): Promise<RemoteItem> {
@@ -144,48 +155,55 @@ export async function writeRunRecord(
   await store.writeText(data.id, RUN_RECORD_NAME, `${JSON.stringify(record, null, 2)}\n`);
 }
 
-// Everything under an archive folder, by path relative to it.
+// Everything under an archive folder, by path relative to it. Folders are listed a level at a
+// time, several at once.
 export async function walk(store: Store, folderId: string) {
   const files = new Map<string, RemoteItem>();
   const folders = new Map<string, RemoteItem>();
-  const visit = async (id: string, prefix: string) => {
-    for (const item of await store.children(id)) {
-      const path = `${prefix}${item.name}`;
-      if (item.folder) {
-        folders.set(path, item);
-        await visit(item.id, `${path}/`);
-      } else {
-        files.set(path, item);
+  let level = [{ id: folderId, prefix: '' }];
+  while (level.length > 0) {
+    const listed = await mapParallel(level, async ({ id, prefix }) => ({ prefix, items: await store.children(id) }));
+    level = [];
+    for (const { prefix, items } of listed) {
+      for (const item of items) {
+        const path = `${prefix}${item.name}`;
+        if (item.folder) {
+          folders.set(path, item);
+          level.push({ id: item.id, prefix: `${path}/` });
+        } else {
+          files.set(path, item);
+        }
       }
     }
-  };
-  await visit(folderId, '');
+  }
   return { files, folders };
 }
 
-async function ensureFolders(store: Store, known: Map<string, string>, dir: string): Promise<string> {
-  const cached = known.get(dir);
-  if (cached) return cached;
-  const slash = dir.lastIndexOf('/');
-  const parentId = await ensureFolders(store, known, slash === -1 ? '' : dir.slice(0, slash));
-  const name = dir.slice(slash + 1);
-  // Only reached inside a folder this run owns, so an existing subfolder is one we made earlier.
-  const folder = (await store.child(parentId, name)) ?? (await store.createFolder(parentId, name));
-  known.set(dir, folder.id);
-  return folder.id;
+// The folder part of a path: "a/b/c.png" → "a/b", "c.png" → "".
+function parentOf(path: string): string {
+  return path.slice(0, Math.max(path.lastIndexOf('/'), 0));
 }
 
-// A file that fails is started again from zero, so a half-sent file is never kept.
-async function uploadWithRetries(store: Store, parentId: string, name: string, local: string, size: number): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const item = await store.upload(parentId, name, local, size);
-      if (item.size !== undefined && item.size !== size) {
-        throw new Error(`${store.label} stored ${item.size} bytes for ${name}, expected ${size}`);
-      }
-      return;
-    } catch (error) {
-      if (attempt >= MAX_FILE_ATTEMPTS) throw error;
-    }
+// Finds or makes every folder the files need and returns each one's ID by path. Parents are done
+// before their children, so the files can then go up in any order.
+async function ensureFolders(store: Store, folderId: string, paths: string[]): Promise<Map<string, string>> {
+  const ids = new Map([['', folderId]]);
+  const wanted = new Set<string>();
+  for (const path of paths) {
+    for (let dir = parentOf(path); dir !== ''; dir = parentOf(dir)) wanted.add(dir);
+  }
+
+  const depth = (dir: string) => dir.split('/').length;
+  for (let level = 1; ; level++) {
+    const dirs = [...wanted].filter((dir) => depth(dir) === level);
+    if (dirs.length === 0) return ids;
+    await mapParallel(dirs, async (dir) => {
+      const parentId = ids.get(parentOf(dir));
+      if (!parentId) throw new Error(`Folder ${dir} has no parent`);
+      const name = dir.slice(dir.lastIndexOf('/') + 1);
+      // Only reached inside a folder this run owns, so an existing subfolder is one we made earlier.
+      const made = (await store.child(parentId, name)) ?? (await store.createFolder(parentId, name));
+      ids.set(dir, made.id);
+    });
   }
 }

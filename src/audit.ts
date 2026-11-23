@@ -1,7 +1,7 @@
 import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-// An append-only record of what the tool did, kept outside Discord (decision D11).
+// An append-only record of what the tool did, kept outside Discord.
 // One JSON object per line. Never holds tokens or message content.
 
 export type AuditEvent =

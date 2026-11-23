@@ -21,10 +21,25 @@ export interface HttpOptions {
 export interface Request extends RequestInit {
   // False for pre-authorised upload URLs, which must not be sent the token.
   auth?: boolean;
+  // How long the server may take to answer: a minute unless set. A request that carries file
+  // bytes needs longer, as they are all sent before the answer comes.
   timeoutMs?: number;
 }
 
 export type Send = (url: string, init?: Request) => Promise<Response>;
+
+// fetch, with a limit on how long the server may take to start answering. Reading the answer is
+// not timed: a big download takes as long as it needs, and Node itself gives up on one that
+// stalls (no data for five minutes).
+export async function fetchWithin(timeoutMs: number, http: typeof fetch, url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`no answer within ${timeoutMs / 1000} seconds`)), timeoutMs);
+  try {
+    return await http(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export function createSend(options: HttpOptions): Send {
   const http = options.fetch ?? fetch;
@@ -37,7 +52,7 @@ export function createSend(options: HttpOptions): Send {
       if (auth) headers.set('authorization', `Bearer ${await options.token()}`);
       let response: Response | null = null;
       try {
-        response = await http(url, { ...rest, headers, signal: AbortSignal.timeout(timeoutMs) });
+        response = await fetchWithin(timeoutMs, http, url, { ...rest, headers });
       } catch (error) {
         if (attempt >= MAX_ATTEMPTS) throw new Error(`Couldn't reach ${options.service}: ${explain(error)}`);
       }
@@ -74,6 +89,20 @@ export async function orNull<T>(request: Promise<T>): Promise<T | null> {
   } catch (error) {
     if (error instanceof RemoteError && error.status === 404) return null;
     throw error;
+  }
+}
+
+const MAX_TRANSFER_ATTEMPTS = 3;
+
+// Runs one file transfer, starting it again from zero if it fails, so a half-sent or half-read
+// file is never kept. The third failure is thrown.
+export async function withRetries<T>(transfer: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await transfer();
+    } catch (error) {
+      if (attempt >= MAX_TRANSFER_ATTEMPTS) throw error;
+    }
   }
 }
 

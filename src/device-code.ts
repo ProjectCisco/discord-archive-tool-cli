@@ -142,23 +142,33 @@ export async function signIn(options: SignInOptions): Promise<TokenSource> {
     throw new Error(STOPS[error] ?? `${provider.name} sign-in failed: ${describe(poll.body, poll.status)}`);
   }
 
+  const renew = async (refreshToken: string): Promise<string> => {
+    const refreshed = await post(provider.tokenUrl, {
+      ...client,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      scope: provider.scope,
+    });
+    if (!refreshed.ok) {
+      throw new Error(`The ${provider.name} sign-in could not be renewed: ${describe(refreshed.body, refreshed.status)}`);
+    }
+    keep(refreshed.body as TokenResponse, refreshToken);
+    return (refreshed.body as TokenResponse).access_token;
+  };
+
+  // Requests run several at a time, so several can find the token about to expire in the same
+  // moment. They share one renewal.
+  let renewing: Promise<string> | null = null;
   return {
     token: async () => {
       const held = current;
       if (!held) throw new Error('Not signed in');
       if (held.expiresAt - now() > REFRESH_MARGIN_MS) return held.accessToken;
       if (!held.refreshToken) throw new Error(`The ${provider.name} sign-in has expired. Run the command again.`);
-      const refreshed = await post(provider.tokenUrl, {
-        ...client,
-        grant_type: 'refresh_token',
-        refresh_token: held.refreshToken,
-        scope: provider.scope,
+      renewing ??= renew(held.refreshToken).finally(() => {
+        renewing = null;
       });
-      if (!refreshed.ok) {
-        throw new Error(`The ${provider.name} sign-in could not be renewed: ${describe(refreshed.body, refreshed.status)}`);
-      }
-      keep(refreshed.body as TokenResponse, held.refreshToken);
-      return (refreshed.body as TokenResponse).access_token;
+      return renewing;
     },
   };
 }

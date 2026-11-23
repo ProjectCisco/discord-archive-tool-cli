@@ -7,12 +7,14 @@ import { walk } from './archive-folder.ts';
 import type { RemoteItem, Store } from './destinations/store.ts';
 import type { Discord, GuildChannel } from './discord.ts';
 import { explain } from './errors.ts';
+import { withRetries } from './http.ts';
 import { MANIFEST_PATH, RUN_RECORD_PATH, transcriptPath } from './layout.ts';
 import { parseManifest, sha256File } from './manifest.ts';
+import { mapParallel } from './parallel.ts';
 import type { RunState } from './state.ts';
 import type { Conversation, Transcript } from './transcript.ts';
 
-// The four checks of decision D9. Delete accepts only an archive where all four passed.
+// The four checks an archive has to pass. Delete accepts only an archive where all four passed.
 // Every check runs to the end, so one report lists every problem at once.
 
 export interface Check {
@@ -79,43 +81,58 @@ export async function readTranscripts(treeDir: string, state: RunState): Promise
   return result;
 }
 
-// Check 1: no channel, thread, post or message appeared after capture, and Discord's own thread
-// counts agree with what was saved.
+// Check 1: no channel, thread, post or message appeared after capture, no message is saved twice,
+// and no thread holds fewer messages than Discord counts.
 export async function checkCapture(
   discord: Discord,
   state: RunState,
   transcripts: Array<{ transcript: Transcript }>,
 ): Promise<Check> {
-  const problems: string[] = [];
   const now = (await discord.guildChannels(state.guildId)).filter((channel) => channel.parent_id === state.categoryId);
-  for (const channel of now) {
-    if (!state.channels[channel.id]) problems.push(`#${channel.name} was added to the category after capture`);
-  }
+  const added = now
+    .filter((channel) => !state.channels[channel.id])
+    .map((channel) => `#${channel.name} was added to the category after capture`);
 
+  // One lookup per conversation, plus one per channel for its threads. None depends on another,
+  // so they run several at a time; the problems still come out in channel order.
   const activeThreads = await discord.activeThreads(state.guildId);
+  const lookups: Array<() => Promise<string[]>> = [];
   for (const { transcript } of transcripts) {
     const live = now.find((channel) => channel.id === transcript.channel.id);
     if (!live) continue; // Already gone from Discord: nothing left to delete.
 
     const conversations: Conversation[] = transcript.kind === 'forum' ? transcript.threads : [transcript, ...transcript.threads];
     for (const conversation of conversations) {
-      const problem = await newerMessages(discord, conversation);
-      if (problem) problems.push(problem);
+      lookups.push(async () => {
+        const problem = savedTwice(conversation) ?? (await newerMessages(discord, conversation));
+        return problem ? [problem] : [];
+      });
     }
-
-    const threadsNow = await listThreads(discord, live, activeThreads);
-    const saved = new Map(transcript.threads.map((thread) => [thread.channel.id, thread]));
-    for (const thread of threadsNow) {
-      const captured = saved.get(thread.id);
-      if (!captured) {
-        problems.push(`#${transcript.channel.name}: thread "${thread.name}" was created after capture`);
-        continue;
-      }
-      const problem = countMismatch(thread, captured.messages);
-      if (problem) problems.push(`#${transcript.channel.name}: ${problem}`);
-    }
+    lookups.push(() => threadProblems(discord, live, activeThreads, transcript));
   }
-  return check('Complete capture', problems);
+  const found = await mapParallel(lookups, (lookup) => lookup());
+  return check('Complete capture', [...added, ...found.flat()]);
+}
+
+async function threadProblems(
+  discord: Discord,
+  live: GuildChannel,
+  activeThreads: GuildChannel[],
+  transcript: Transcript,
+): Promise<string[]> {
+  const problems: string[] = [];
+  const saved = new Map(transcript.threads.map((thread) => [thread.channel.id, thread]));
+  for (const thread of await listThreads(discord, live, activeThreads)) {
+    const captured = saved.get(thread.id);
+    const problem = captured ? countMismatch(thread, captured.messages) : `thread "${thread.name}" was created after capture`;
+    if (problem) problems.push(`#${transcript.channel.name}: ${problem}`);
+  }
+  return problems;
+}
+
+function savedTwice(conversation: Conversation): string | null {
+  const ids = new Set(conversation.messages.map((message) => message.id));
+  return ids.size === conversation.messages.length ? null : `#${conversation.channel.name} has a message saved twice`;
 }
 
 async function newerMessages(discord: Discord, conversation: Conversation): Promise<string | null> {
@@ -128,6 +145,8 @@ async function newerMessages(discord: Discord, conversation: Conversation): Prom
   }
 }
 
+// Discord's count can run low (real threads came back 1 to 3 under what was saved, all normal
+// messages, none saved twice), so only fewer saved than counted means something was missed.
 function countMismatch(thread: GuildChannel, messages: APIMessage[]): string | null {
   if (thread.message_count === undefined) return null;
   const created = Number((BigInt(thread.id) >> 22n) + DISCORD_EPOCH);
@@ -137,13 +156,13 @@ function countMismatch(thread: GuildChannel, messages: APIMessage[]): string | n
   const counted = messages.filter(
     (message) => message.id !== thread.id && message.type !== MessageType.ThreadStarterMessage,
   ).length;
-  return counted === thread.message_count
+  return counted >= thread.message_count
     ? null
-    : `thread "${thread.name}": Discord counts ${thread.message_count} messages, the archive has ${counted}`;
+    : `thread "${thread.name}": Discord counts ${thread.message_count} messages, the archive has only ${counted}`;
 }
 
 // Check 2: every local file still matches the manifest, and every attachment is the size Discord
-// reported (or the converted-copy case of decision D32, recorded at capture).
+// reported (or, where Discord records a converted copy, the size noted for it at capture).
 async function checkFiles(
   treeDir: string,
   transcripts: Array<{ folder: string; transcript: Transcript }>,
@@ -203,18 +222,20 @@ async function checkUpload(
   const expected = new Map(manifest);
   expected.set(MANIFEST_PATH, await sha256File(join(treeDir, MANIFEST_PATH)));
 
-  const remote: Record<string, RemoteFile> = {};
-  for (const [path, sha256] of expected) {
+  const readBack = await mapParallel([...expected], async ([path, sha256]) => {
     const item = files.get(path);
-    if (!item) {
-      problems.push(`${path} is missing from ${store.label}`);
-      continue;
-    }
+    if (!item) return { path, file: null, problem: `${path} is missing from ${store.label}` };
     const local = await stat(join(treeDir, path)).then((info) => info.size, () => -1);
-    const back = await store.download(item.id);
-    if (back.size !== local || item.size !== local) problems.push(`${path} is ${back.size} bytes in ${store.label}, ${local} locally`);
-    else if (back.sha256 !== sha256) problems.push(`${path} in ${store.label} doesn't match the local copy`);
-    remote[path] = { size: back.size, checksum: item.checksum };
+    const back = await withRetries(() => store.download(item.id));
+    let problem: string | null = null;
+    if (back.size !== local || item.size !== local) problem = `${path} is ${back.size} bytes in ${store.label}, ${local} locally`;
+    else if (back.sha256 !== sha256) problem = `${path} in ${store.label} doesn't match the local copy`;
+    return { path, file: { size: back.size, checksum: item.checksum }, problem };
+  });
+  const remote: Record<string, RemoteFile> = {};
+  for (const { path, file, problem } of readBack) {
+    if (file) remote[path] = file;
+    if (problem) problems.push(problem);
   }
 
   for (const path of files.keys()) {

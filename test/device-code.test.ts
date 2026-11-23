@@ -103,4 +103,26 @@ describe('signIn', () => {
     assert.equal(await tokens.token(), 'access-3');
     assert.equal(fake.calls.at(-1)?.form.get('refresh_token'), 'refresh-1', 'kept the earlier refresh token');
   });
+
+  test('renews once when several requests find the token about to expire together', async () => {
+    const fake = fakeProvider([token('access-1'), token('access-2', 'refresh-2'), token('access-3', 'refresh-3')]);
+    const tokens = await signIn(fake.options(microsoft));
+    fake.advance(56 * 60_000);
+    const before = fake.calls.length;
+    assert.deepEqual(await Promise.all([tokens.token(), tokens.token(), tokens.token()]), ['access-2', 'access-2', 'access-2']);
+    assert.equal(fake.calls.length, before + 1);
+
+    // A later expiry renews again, with the newest refresh token.
+    fake.advance(56 * 60_000);
+    assert.equal(await tokens.token(), 'access-3');
+    assert.equal(fake.calls.at(-1)?.form.get('refresh_token'), 'refresh-2');
+  });
+
+  test('tries again after a renewal that failed', async () => {
+    const fake = fakeProvider([token('access-1'), [503, {}], token('access-2')]);
+    const tokens = await signIn(fake.options(microsoft));
+    fake.advance(56 * 60_000);
+    await assert.rejects(tokens.token(), /could not be renewed: HTTP 503/);
+    assert.equal(await tokens.token(), 'access-2');
+  });
 });

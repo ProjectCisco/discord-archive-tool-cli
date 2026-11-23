@@ -27,9 +27,10 @@ let treeDir: string;
 beforeEach(async () => {
   treeDir = await mkdtemp(join(tmpdir(), 'tree-'));
   await mkdir(join(treeDir, 'case-one', 'attachments'), { recursive: true });
+  await mkdir(join(treeDir, '_data'));
   await writeFile(join(treeDir, '_index.html'), 'index');
   await writeFile(join(treeDir, 'case-one', 'case-one.html'), 'page');
-  await writeFile(join(treeDir, 'case-one', 'case-one.json'), '{}');
+  await writeFile(join(treeDir, '_data', 'case-one.json'), '{}');
   await writeFile(join(treeDir, 'case-one', 'attachments', 'image.png'), 'png');
   await writeManifest(treeDir);
 });
@@ -37,7 +38,15 @@ afterEach(async () => {
   await rm(treeDir, { recursive: true, force: true });
 });
 
-async function upload(drive: FakeStore, run = state(), saves: number[] = []) {
+// More files for case-one, so several are waiting to go up at once.
+async function addFiles(count: number): Promise<void> {
+  for (let index = 0; index < count; index++) {
+    await writeFile(join(treeDir, 'case-one', 'attachments', `file-${index}.png`), `png ${index}`);
+  }
+  await writeManifest(treeDir);
+}
+
+async function upload(drive: FakeStore, run = state(), saves: number[] = [], logs: string[] = []) {
   return uploadArchive({
     store: drive.store,
     destination: 'onedrive',
@@ -46,7 +55,7 @@ async function upload(drive: FakeStore, run = state(), saves: number[] = []) {
     save: async () => {
       saves.push(Object.keys(run.upload?.files ?? {}).length);
     },
-    log: () => {},
+    log: (line) => logs.push(line),
   });
 }
 
@@ -62,15 +71,14 @@ describe('uploadArchive', () => {
     const base = 'Team/Archives/Archive_ November 2026';
     assert.equal(result.folderName, 'Archive_ November 2026');
     assert.equal(result.uploaded, 5);
-    assert.deepEqual(drive.writes, [
-      `${base}/${RUN_RECORD_PATH}`,
+    // The channel files go up several at a time, in any order, between the fixed first and last ones.
+    assert.equal(drive.writes[0], `${base}/${RUN_RECORD_PATH}`);
+    assert.deepEqual(drive.writes.slice(1, 4).sort(), [
+      `${base}/_data/case-one.json`,
       `${base}/case-one/attachments/image.png`,
       `${base}/case-one/case-one.html`,
-      `${base}/case-one/case-one.json`,
-      `${base}/_index.html`,
-      `${base}/${MANIFEST_PATH}`,
-      `${base}/${RUN_RECORD_PATH}`,
     ]);
+    assert.deepEqual(drive.writes.slice(4), [`${base}/_index.html`, `${base}/${MANIFEST_PATH}`, `${base}/${RUN_RECORD_PATH}`]);
     assert.equal(drive.text(`${base}/case-one/attachments/image.png`), 'png');
     assert.deepEqual(
       { ...record(drive), updatedAt: 'x' },
@@ -83,19 +91,91 @@ describe('uploadArchive', () => {
     drive.folder('Team/Archives');
     const run = state();
     const saves: number[] = [];
-    await upload(drive, run, saves);
-    assert.deepEqual(saves, [1, 2, 3, 4, 5]);
+    const logs: string[] = [];
+    await upload(drive, run, saves, logs);
+    // One save per file, each made after its own file was recorded.
+    assert.equal(saves.length, 5);
+    assert.ok(saves.every((recorded, index) => recorded >= index + 1), saves.join(','));
+    assert.equal(saves.at(-1), 5);
+    assert.deepEqual(logs.map((line) => line.split(' ')[0]), ['[1/5]', '[2/5]', '[3/5]', '[4/5]', '[5/5]']);
 
     await writeFile(join(treeDir, 'case-one', 'case-one.html'), 'page, re-rendered');
     await writeManifest(treeDir);
     drive.writes.length = 0;
-    const again = await upload(drive, run);
+    logs.length = 0;
+    const again = await upload(drive, run, [], logs);
     assert.equal(again.skipped, 3);
+    assert.deepEqual(logs, ['[4/5] case-one/case-one.html', `[5/5] ${MANIFEST_PATH}`]);
     assert.deepEqual(drive.writes, [
       'Team/Archives/Archive_ November 2026/case-one/case-one.html',
       `Team/Archives/Archive_ November 2026/${MANIFEST_PATH}`,
       `Team/Archives/Archive_ November 2026/${RUN_RECORD_PATH}`,
     ]);
+  });
+
+  test('sends several files at once, but writes the run state one save at a time', async () => {
+    await addFiles(12);
+    const drive = fakeStore();
+    drive.folder('Team/Archives');
+    // Long enough that the four uploads are sure to overlap, whatever else the machine is doing.
+    const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const busy = { uploads: 0, mostUploads: 0, saves: 0, mostSaves: 0 };
+    const real = drive.store.upload;
+    drive.store.upload = async (...args) => {
+      busy.mostUploads = Math.max(busy.mostUploads, ++busy.uploads);
+      await pause(25);
+      busy.uploads--;
+      return real(...args);
+    };
+
+    const run = state();
+    await uploadArchive({
+      store: drive.store,
+      destination: 'onedrive',
+      treeDir,
+      state: run,
+      save: async () => {
+        busy.mostSaves = Math.max(busy.mostSaves, ++busy.saves);
+        await pause(2);
+        busy.saves--;
+      },
+      log: () => {},
+    });
+    assert.equal(busy.mostUploads, 4);
+    assert.equal(busy.mostSaves, 1);
+    assert.equal(Object.keys(run.upload?.files ?? {}).length, 17);
+  });
+
+  test('makes each folder once, before any file goes into it', async () => {
+    await mkdir(join(treeDir, 'case-two', 'attachments'), { recursive: true });
+    for (const name of ['a.png', 'b.png', 'c.png']) await writeFile(join(treeDir, 'case-two', 'attachments', name), name);
+    await writeManifest(treeDir);
+    const drive = fakeStore();
+    drive.folder('Team/Archives');
+    const events: string[] = [];
+    const { createFolder, upload: send } = drive.store;
+    drive.store.createFolder = async (parentId, name) => {
+      events.push(`folder ${name}`);
+      return createFolder(parentId, name);
+    };
+    drive.store.upload = async (parentId, name, ...rest) => {
+      events.push(`file ${name}`);
+      return send(parentId, name, ...rest);
+    };
+    await upload(drive);
+
+    const folders = events.filter((event) => event.startsWith('folder')).sort();
+    assert.deepEqual(folders, [
+      'folder Archive_ November 2026',
+      'folder _data',
+      'folder attachments',
+      'folder attachments',
+      'folder case-one',
+      'folder case-two',
+    ]);
+    const lastFolder = events.findLastIndex((event) => event.startsWith('folder'));
+    assert.ok(lastFolder < events.findIndex((event) => event.startsWith('file')));
+    assert.equal(drive.text('Team/Archives/Archive_ November 2026/case-two/attachments/b.png'), 'b.png');
   });
 
   test('sends everything again if the folder was replaced since the last run', async () => {
@@ -165,6 +245,49 @@ describe('uploadArchive', () => {
     await writeFile(join(treeDir, '_index.html'), 'changed');
     await writeManifest(treeDir);
     await assert.rejects(upload(drive), /connection reset/);
+  });
+
+  test('stops when the destination stored a different number of bytes than were sent', async () => {
+    const drive = fakeStore();
+    drive.folder('Team/Archives');
+    const real = drive.store.upload;
+    let tries = 0;
+    drive.store.upload = async (parentId, name, ...rest) => {
+      const item = await real(parentId, name, ...rest);
+      if (name !== 'image.png') return item;
+      tries++;
+      return { ...item, size: 1 };
+    };
+    await assert.rejects(upload(drive), /Test Drive stored 1 bytes for image\.png, expected 3/);
+    assert.equal(tries, 3);
+  });
+
+  test('when a file keeps failing, records the ones that arrived and never sends the index or manifest', async () => {
+    await addFiles(12);
+    const drive = fakeStore();
+    drive.folder('Team/Archives');
+    const real = drive.store.upload;
+    drive.store.upload = async (parentId, name, ...rest) => {
+      if (name === 'file-3.png') throw new Error('connection reset');
+      return real(parentId, name, ...rest);
+    };
+
+    const run = state();
+    await assert.rejects(upload(drive, run), /connection reset/);
+    const recorded = Object.keys(run.upload?.files ?? {});
+    const arrived = drive.writes
+      .map((path) => path.replace('Team/Archives/Archive_ November 2026/', ''))
+      .filter((path) => path !== RUN_RECORD_PATH);
+    assert.deepEqual(recorded.sort(), arrived.sort(), 'the record matches what is in the folder');
+    assert.ok(recorded.length > 0 && !recorded.includes('case-one/attachments/file-3.png'));
+    assert.ok(!recorded.includes('_index.html') && !recorded.includes(MANIFEST_PATH));
+
+    // Running again sends only what is missing.
+    drive.store.upload = real;
+    drive.writes.length = 0;
+    const again = await upload(drive, run);
+    assert.equal(again.skipped, recorded.length);
+    assert.equal(again.uploaded + again.skipped, 17);
   });
 });
 

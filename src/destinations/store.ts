@@ -30,5 +30,7 @@ export interface Store {
   download: (id: string) => Promise<{ size: number; sha256: string }>;
 }
 
-// Upload chunk size. A multiple of 320 KiB (OneDrive) and of 256 KiB (Google): 10 MiB.
-export const CHUNK_SIZE = 10 * 1024 * 1024;
+// Upload chunk size: 5 MiB, a multiple of 320 KiB (OneDrive) and of 256 KiB (Google). Microsoft
+// recommends 5 to 10 MiB. Several files go up at once and share the line, so this is the low end:
+// each request has to finish within a few minutes even on a slow connection.
+export const CHUNK_SIZE = 5 * 1024 * 1024;

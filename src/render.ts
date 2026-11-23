@@ -1,5 +1,6 @@
 import { MessageReferenceType, MessageType } from 'discord-api-types/v10';
 import type { APIAttachment, APIEmbed, APIMessage, APIUser } from 'discord-api-types/v10';
+import { componentContent } from './components.ts';
 import { escapeHtml } from './html.ts';
 import { renderMarkdown } from './markdown.ts';
 import { fileKey, type Person, type Thread, type Transcript } from './transcript.ts';
@@ -181,6 +182,20 @@ function forwardBlock(message: APIMessage, transcript: Transcript): string {
   );
 }
 
+// Text and images held in components (Discord's newer message layout). Uploaded images in
+// them are already shown with the attachments.
+function componentBlock(message: APIMessage, transcript: Transcript): string {
+  const { text, media } = componentContent(message);
+  const parts = text.map((content) => `<div class="content">${formatContent(content, transcript)}</div>`);
+  for (const index of media.keys()) {
+    const image = transcript.files[fileKey.media(message.id, index)];
+    parts.push(
+      image ? `<img src="${href(image.path)}" alt="image" loading="lazy">` : '<div class="missing">Image not archived</div>',
+    );
+  }
+  return parts.join('');
+}
+
 function extras(message: APIMessage, transcript: Transcript): string {
   const parts: string[] = [];
 
@@ -222,13 +237,20 @@ function renderMessage(message: APIMessage, transcript: Transcript): string {
   if (!CONVERSATION.has(message.type)) {
     const label = SYSTEM_LABELS.get(message.type) ?? `system message (type ${message.type})`;
     const detail = message.content ? `: ${escapeHtml(message.content)}` : '';
-    return `<article class="msg system" id="msg-${escapeHtml(message.id)}">${name} ${label}${detail}${time}</article>`;
+    // Some notices carry more than a line, e.g. an AutoMod alert or a poll's result in an embed.
+    const more =
+      attachmentList(message.attachments, transcript) +
+      embedList(message.embeds, message.id, transcript) +
+      componentBlock(message, transcript);
+    return `<article class="msg system" id="msg-${escapeHtml(message.id)}">${name} ${label}${detail}${time}${more}</article>`;
   }
 
   const edited = message.edited_timestamp ? `<span class="edited">(edited ${utc(message.edited_timestamp)})</span>` : '';
   const pinned = message.pinned ? '<span class="pinned">📌 pinned</span>' : '';
   const forward = forwardBlock(message, transcript);
-  const main = forward !== '' && message.content === '' ? '' : body(message.content, transcript);
+  const components = componentBlock(message, transcript);
+  // An empty content is only "[No text content]" when nothing else carries the message.
+  const main = message.content === '' && (forward !== '' || components !== '') ? '' : body(message.content, transcript);
 
   return (
     `<article class="msg" id="msg-${escapeHtml(message.id)}">` +
@@ -238,6 +260,7 @@ function renderMessage(message: APIMessage, transcript: Transcript): string {
     main +
     attachmentList(message.attachments, transcript) +
     embedList(message.embeds, message.id, transcript) +
+    components +
     extras(message, transcript) +
     '</article>'
   );
@@ -360,7 +383,7 @@ export function renderCategoryIndex(input: {
       : `<p class="meta">${input.converted} ${input.converted === 1 ? 'file was' : 'files were'} saved as the original upload. Discord's own record lists a converted copy with a different size.</p>`;
   const misses =
     input.misses.length === 0
-      ? '<p class="meta">Every embed and sticker image was archived.</p>'
+      ? '<p class="meta">Every embed, sticker and bot-message image was archived.</p>'
       : `<h2>Not archived (best effort only)</h2><ul>${input.misses.map((miss) => `<li>${escapeHtml(miss)}</li>`).join('')}</ul>`;
   const header =
     `<h1>${escapeHtml(input.categoryName)}</h1>` +

@@ -47,11 +47,12 @@ export interface Transcript extends Conversation {
     channels: Record<string, string>;
     forwardAuthors: Record<string, Person>;
   };
-  // Keyed by attachment ID, or by fileKey for embed and sticker images.
+  // Keyed by attachment ID, or by fileKey for embed, sticker and component images.
   files: Record<string, ArchivedFile>;
 }
 
 export const fileKey = {
   embed: (prefix: string, index: number) => `embed:${prefix}:${index}`,
   sticker: (stickerId: string) => `sticker:${stickerId}`,
+  media: (messageId: string, index: number) => `media:${messageId}:${index}`,
 };
